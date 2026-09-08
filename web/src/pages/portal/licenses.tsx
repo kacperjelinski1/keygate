@@ -91,12 +91,17 @@ function LicenseCard({ license: lic }: { license: PortalLicense }) {
     setTimeout(() => setCopied(false), 2000)
   }
 
+  // Change plan, cancel and payment-method updates all act on a Stripe
+  // subscription. A one-time purchase has none: the backend answers 400
+  // to each, so don't offer them.
+  const hasSubscription = lic.payment_provider === "stripe" && !!lic.stripe_subscription_id
+
   const handleBillingPortal = async () => {
     try {
       const res = await portal.getBillingPortal({ license_id: lic.id })
       window.location.href = res.url
-    } catch {
-      // ignore
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : "An error occurred")
     }
   }
 
@@ -147,26 +152,22 @@ function LicenseCard({ license: lic }: { license: PortalLicense }) {
           )}
         </div>
 
-        {/* Subscription Actions */}
+        {/* Billing actions */}
         {lic.payment_provider === "stripe" && (
           <div className="flex gap-2 flex-wrap">
-            {lic.payment_provider === "stripe" && (
-              <>
-                <Button variant="outline" size="sm" onClick={() => setShowInvoices(true)}>
-                  {t("portal.viewInvoices")}
-                </Button>
-                <Button variant="outline" size="sm" onClick={handleBillingPortal}>
-                  {t("portal.updatePayment")}
-                </Button>
-              </>
+            <Button variant="outline" size="sm" onClick={() => setShowInvoices(true)}>
+              {t("portal.viewInvoices")}
+            </Button>
+            {hasSubscription && (
+              <Button variant="outline" size="sm" onClick={handleBillingPortal}>
+                {t("portal.updatePayment")}
+              </Button>
             )}
-            {(lic.status === "active" || lic.status === "trialing") && (
+            {hasSubscription && (lic.status === "active" || lic.status === "trialing") && (
               <>
-                {lic.payment_provider === "stripe" && (
-                  <Button variant="outline" size="sm" onClick={() => setShowChangePlan(true)}>
-                    {t("portal.changePlan")}
-                  </Button>
-                )}
+                <Button variant="outline" size="sm" onClick={() => setShowChangePlan(true)}>
+                  {t("portal.changePlan")}
+                </Button>
                 <Button variant="outline" size="sm" className="text-destructive" onClick={() => setShowCancel(true)}>
                   {t("portal.cancelSubscription")}
                 </Button>
@@ -819,9 +820,12 @@ function ChangePlanDialog({ license, onClose }: { license: PortalLicense; onClos
     queryKey: ["portal", "plans", license.product_id],
     queryFn: () => portal.listPlans(license.product_id),
   })
-  // Filter: only plans with Stripe price, exclude current
-  const isStripe = license.payment_provider === "stripe"
-  const plans = (plansData?.plans || []).filter((p: any) => p.id !== license.plan_id && isStripe && p.stripe_price_id)
+  // Only other subscription plans with a Stripe price: a subscription
+  // can move between prices, not become a one-time purchase. Mirrors
+  // the backend's change-plan gate.
+  const plans = (plansData?.plans || []).filter(
+    (p: any) => p.id !== license.plan_id && p.license_type === "subscription" && p.stripe_price_id,
+  )
 
   const changeMut = useMutation({
     mutationFn: (newPriceId: string) => portal.changePlan({ license_id: license.id, new_price_id: newPriceId }),
@@ -847,7 +851,8 @@ function ChangePlanDialog({ license, onClose }: { license: PortalLicense; onClos
                 <div>
                   <p className="font-medium text-sm">{plan.name}</p>
                   <p className="text-xs text-muted-foreground">
-                    {plan.license_type} · {plan.billing_interval || t("plans.perpetual")}
+                    {plan.license_type}
+                    {plan.billing_interval ? ` · ${plan.billing_interval}` : ""}
                   </p>
                 </div>
                 <Button

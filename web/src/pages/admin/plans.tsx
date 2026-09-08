@@ -308,7 +308,10 @@ function PlanDialog({
     name: plan?.name || "",
     slug: plan?.slug || "",
     license_type: plan?.license_type || "subscription",
-    billing_interval: plan?.billing_interval || "month",
+    // An existing plan keeps its stored interval; the server omits an
+    // empty one from JSON, so "undefined" here means "none", not
+    // "unset". Only a brand-new plan defaults to monthly.
+    billing_interval: plan ? (plan.license_type === "perpetual" ? "" : (plan.billing_interval ?? "")) : "month",
     max_activations: plan?.max_activations ?? 3,
     max_seats: plan?.max_seats ?? 1,
     trial_days: plan?.trial_days ?? 0,
@@ -321,6 +324,14 @@ function PlanDialog({
   })
 
   const set = (key: string, val: string | number | boolean) => setForm((f) => ({ ...f, [key]: val }))
+
+  // A perpetual plan is paid once and never renews, so it has no
+  // billing interval. The server clears it too; mirror that here so
+  // the form doesn't show a period the plan will never bill on.
+  const isPerpetual = form.license_type === "perpetual"
+  const setLicenseType = (v: string) => {
+    setForm((f) => ({ ...f, license_type: v, billing_interval: v === "perpetual" ? "" : f.billing_interval }))
+  }
 
   // Capability map keyed by the currently-selected product's type.
   // Mirrors backend model.ProductSupports — DO NOT diverge or admins
@@ -405,7 +416,7 @@ function PlanDialog({
             </div>
             <div className="space-y-2">
               <Label>{t("plans.licenseType")}</Label>
-              <Select value={form.license_type} onValueChange={(v) => set("license_type", v)}>
+              <Select value={form.license_type} onValueChange={setLicenseType}>
                 <SelectTrigger>
                   <SelectValue />
                 </SelectTrigger>
@@ -421,6 +432,7 @@ function PlanDialog({
               <Select
                 value={form.billing_interval || "none"}
                 onValueChange={(v) => set("billing_interval", v === "none" ? "" : v)}
+                disabled={isPerpetual}
               >
                 <SelectTrigger>
                   <SelectValue />

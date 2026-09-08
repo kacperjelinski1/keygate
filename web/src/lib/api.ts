@@ -549,6 +549,10 @@ export interface License {
   // Admin list/detail carry a last-four hint instead — see PortalLicense.
   license_key?: string
   payment_provider?: string
+  // Set only for subscription-backed Stripe licenses. A one-time
+  // purchase has no subscription, so nothing to change, cancel, or
+  // update a payment method for.
+  stripe_subscription_id?: string
   status: string
   valid_from: string
   valid_until?: string

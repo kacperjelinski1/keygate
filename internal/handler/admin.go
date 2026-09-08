@@ -247,6 +247,23 @@ func (h *AdminHandler) GetPlan(c *gin.Context) {
 	response.OK(c, p)
 }
 
+// normalizeBillingInterval validates a plan's billing interval against
+// its license type. The interval is descriptive (checkout mode comes
+// from the Stripe price), so a perpetual plan carries none: it is paid
+// once and never renews, and showing "monthly" on it would promise a
+// renewal that never happens.
+func normalizeBillingInterval(licenseType, interval string) (string, error) {
+	switch interval {
+	case "", "month", "year":
+	default:
+		return "", errors.New("billing_interval must be month, year, or empty")
+	}
+	if licenseType == "perpetual" {
+		return "", nil
+	}
+	return interval, nil
+}
+
 func (h *AdminHandler) CreatePlan(c *gin.Context) {
 	var req struct {
 		ProductID       string `json:"product_id" binding:"required"`
@@ -285,6 +302,11 @@ func (h *AdminHandler) CreatePlan(c *gin.Context) {
 	case "subscription", "perpetual", "trial":
 	default:
 		response.BadRequest(c, "license_type must be subscription, perpetual, or trial")
+		return
+	}
+	billingInterval, err := normalizeBillingInterval(req.LicenseType, req.BillingInterval)
+	if err != nil {
+		response.BadRequest(c, err.Error())
 		return
 	}
 
@@ -367,7 +389,7 @@ func (h *AdminHandler) CreatePlan(c *gin.Context) {
 		Name:            req.Name,
 		Slug:            req.Slug,
 		LicenseType:     req.LicenseType,
-		BillingInterval: req.BillingInterval,
+		BillingInterval: billingInterval,
 		MaxActivations:  req.MaxActivations,
 		MaxSeats:        req.MaxSeats,
 		TrialDays:       req.TrialDays,
@@ -465,6 +487,22 @@ func (h *AdminHandler) UpdatePlan(c *gin.Context) {
 			return
 		}
 	}
+	// The interval is checked against the license type the row will
+	// have after this update, so switching a plan to perpetual clears
+	// a stale interval even when the request doesn't mention it.
+	licenseType := p.LicenseType
+	if req.LicenseType != nil {
+		licenseType = *req.LicenseType
+	}
+	billingInterval := p.BillingInterval
+	if req.BillingInterval != nil {
+		billingInterval = *req.BillingInterval
+	}
+	billingInterval, err = normalizeBillingInterval(licenseType, billingInterval)
+	if err != nil {
+		response.BadRequest(c, err.Error())
+		return
+	}
 
 	// Numeric-range validation. Pull from the request when the
 	// field was provided, otherwise the existing row value (so a
@@ -508,9 +546,7 @@ func (h *AdminHandler) UpdatePlan(c *gin.Context) {
 	if req.LicenseType != nil {
 		p.LicenseType = *req.LicenseType
 	}
-	if req.BillingInterval != nil {
-		p.BillingInterval = *req.BillingInterval
-	}
+	p.BillingInterval = billingInterval
 	if req.MaxActivations != nil {
 		p.MaxActivations = *req.MaxActivations
 	}
