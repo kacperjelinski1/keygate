@@ -91,7 +91,8 @@ export const auth = {
 
 // ─── Checkout ───
 export const checkout = {
-  verify: (sessionId: string) => get<{ status: string; email?: string }>(`/checkout/verify?session_id=${sessionId}`),
+  verify: (sessionId: string) =>
+    get<{ status: string; email?: string; kind?: string }>(`/checkout/verify?session_id=${sessionId}`),
 }
 
 // ─── Invites (public, token-only) ───
@@ -108,7 +109,7 @@ export const invites = {
 
 // ─── Portal ───
 export const portal = {
-  licenses: () => get<{ licenses: PortalLicense[] }>("/portal/licenses"),
+  licenses: () => get<{ licenses: PortalLicense[]; renewals_enabled?: boolean }>("/portal/licenses"),
   listPlans: (productId: string) => get<{ plans: Plan[] }>(`/portal/plans?product_id=${productId}`),
   updateProfile: (data: { name: string }) =>
     put<{ id: string; email: string; name: string; avatar_url: string; role: string }>("/portal/profile", data),
@@ -143,6 +144,7 @@ export const portal = {
     post<{ url: string }>("/portal/subscription/billing-portal", data),
   getInvoices: (licenseId: string) =>
     get<{ invoices: Invoice[] }>(`/portal/subscription/invoices?license_id=${licenseId}`),
+  renewUpdates: (data: { license_id: string }) => post<{ url: string }>("/portal/updates/renew", data),
 }
 
 // ─── Admin ───
@@ -214,6 +216,9 @@ export const admin = {
   // Empty valid_until clears the expiry (perpetual license).
   setLicenseValidUntil: (id: string, validUntil: string) =>
     post<License>(`/admin/licenses/${id}/valid-until`, { valid_until: validUntil }),
+  // Empty updates_until means updates for life.
+  setLicenseUpdatesUntil: (id: string, updatesUntil: string) =>
+    post<License>(`/admin/licenses/${id}/updates-until`, { updates_until: updatesUntil }),
   revokeLicense: (id: string) => post(`/admin/licenses/${id}/revoke`),
   suspendLicense: (id: string) => post(`/admin/licenses/${id}/suspend`),
   reinstateLicense: (id: string) => post(`/admin/licenses/${id}/reinstate`),
@@ -502,6 +507,9 @@ export interface Product {
   minimum_supported_version?: string
   minimum_supported_message?: string
   require_signing: boolean
+  // Update feeds answer only with a license key (maintenance-period products).
+  feed_license_required?: boolean
+  feed_gated_at?: string
   created_at: string
 }
 
@@ -521,6 +529,11 @@ export interface Plan {
   trial_days: number
   grace_days: number
   stripe_price_id?: string
+  // Maintenance period (perpetual plans): days of updates a purchase
+  // includes (0 = for life) and the one-time renewal sold in the portal.
+  updates_days?: number
+  renewal_days?: number
+  stripe_renewal_price_id?: string
   active: boolean
   sort_order: number
   created_at: string
@@ -556,6 +569,8 @@ export interface License {
   status: string
   valid_from: string
   valid_until?: string
+  // End of a perpetual license's update period; absent = no separate limit.
+  updates_until?: string
   canceled_at?: string
   suspended_at?: string
   org_name?: string

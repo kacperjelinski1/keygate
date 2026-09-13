@@ -5,13 +5,16 @@ import (
 	"context"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"syscall"
 	"time"
@@ -34,6 +37,85 @@ import (
 	"github.com/tabloy/keygate/internal/version"
 	"github.com/tabloy/keygate/pkg/response"
 )
+
+// credentialQueryParams are query parameters whose values must never
+// reach a log line. An updater sends a signed token this way when it
+// cannot set a header; the license key itself is refused in the URL,
+// but a client that tries still must not have it logged.
+var credentialQueryParams = []string{"license_key", "license_token"}
+
+// redactPath replaces the value of every credential query parameter
+// in a "path?query" string, leaving everything else as it was.
+func redactPath(path string) string {
+	i := strings.IndexByte(path, '?')
+	if i < 0 {
+		return path
+	}
+	query, err := url.ParseQuery(path[i+1:])
+	if err != nil {
+		// Unparseable: drop the query rather than log it unexamined.
+		return path[:i] + "?<redacted>"
+	}
+	redacted := false
+	for _, name := range credentialQueryParams {
+		if _, ok := query[name]; ok {
+			query.Set(name, "redacted")
+			redacted = true
+		}
+	}
+	if !redacted {
+		return path
+	}
+	return path[:i] + "?" + query.Encode()
+}
+
+// redactedRecovery replaces gin.Recovery(). Gin's dumps the whole
+// request on a panic — and on a broken pipe in any mode — masking
+// only Authorization, so the request URI and the license key or
+// token headers would end up in the log. This logs the same facts
+// with all three redacted, and answers 500 as gin's does. Gin
+// handles a broken pipe itself (there is no connection left to
+// answer on); its dump goes to io.Discard.
+func redactedRecovery() gin.HandlerFunc {
+	return gin.CustomRecoveryWithWriter(io.Discard, func(c *gin.Context, err any) {
+		fields := []any{
+			"method", c.Request.Method,
+			"path", redactPath(c.Request.URL.RequestURI()),
+			"client_ip", c.ClientIP(),
+			"panic", fmt.Sprint(err),
+			"stack", string(debug.Stack()),
+		}
+		for _, h := range []string{"X-License-Key", "X-License-Token", "Authorization"} {
+			if c.GetHeader(h) != "" {
+				fields = append(fields, h, "redacted")
+			}
+		}
+		slog.Error("panic recovered", fields...)
+		c.AbortWithStatus(http.StatusInternalServerError)
+	})
+}
+
+// redactedLogFormatter is gin's default log line with the query
+// string redacted.
+func redactedLogFormatter(p gin.LogFormatterParams) string {
+	if p.Latency > time.Minute {
+		p.Latency = p.Latency.Truncate(time.Second)
+	}
+	return fmt.Sprintf("[GIN] %v | %3d | %13v | %15s | %-7s %#v\n%s",
+		p.TimeStamp.Format("2006/01/02 - 15:04:05"),
+		p.StatusCode,
+		p.Latency,
+		p.ClientIP,
+		p.Method,
+		redactPath(p.Path),
+		p.ErrorMessage,
+	)
+}
+
+// defaultFeedURLTTL mirrors the STORAGE_FEED_URL_TTL default: what a
+// public feed's presigned links live for unless the operator says
+// otherwise.
+const defaultFeedURLTTL = 24 * time.Hour
 
 func main() {
 	cfg, err := config.Load()
@@ -141,11 +223,19 @@ func main() {
 			"value", cfg.StorageDownloadTTL, "error", err)
 		downloadTTL = 0
 	}
+	// Normalised here, not per consumer: the admin API, the store's
+	// fulfilment guard and the public feed all measure the same wait
+	// against it, and a zero left for each of them to interpret is
+	// how they came to disagree once already.
+	// Longer than store.MaxDurationSetting counts as invalid: S3 and
+	// compatible stores refuse to sign a link for that long, and it is
+	// the same ceiling the recorded bound is held to.
 	feedTTL, err := time.ParseDuration(cfg.StorageFeedURLTTL)
-	if err != nil {
-		logger.Warn("storage: invalid STORAGE_FEED_URL_TTL, using service default",
-			"value", cfg.StorageFeedURLTTL, "error", err)
-		feedTTL = 0
+	if err != nil || feedTTL <= 0 || feedTTL > store.MaxDurationSetting {
+		logger.Warn("storage: invalid STORAGE_FEED_URL_TTL, using the default",
+			"value", cfg.StorageFeedURLTTL, "max", store.MaxDurationSetting,
+			"default", defaultFeedURLTTL, "error", err)
+		feedTTL = defaultFeedURLTTL
 	}
 
 	// Master encryption key drives two independent features via HKDF:
@@ -222,6 +312,28 @@ func main() {
 	expiryChecker := service.NewExpiryChecker(db, emailSvc, webhookSvc, logger)
 	meteredSyncer := service.NewMeteredBillingSyncer(db, logger)
 	adminH := handler.NewAdminHandler(db, webhookSvc, emailSvc, expiryChecker, meteredSyncer)
+	// An update period may only be written once the links a public
+	// feed handed out have expired, and this is how long they live.
+	// The admin API and the fulfilment guard measure the same wait
+	// against the same value. Links already signed keep the lifetime
+	// they were signed with, so after lowering STORAGE_FEED_URL_TTL
+	// leave the maintenance features off until the longer-lived ones
+	// are gone.
+	db.SetFeedURLTTL(feedTTL)
+	adminH.FeedURLTTL = feedTTL
+	// Recorded across replicas and across restarts: links signed
+	// before this start keep the lifetime they were signed with, so
+	// the wait is measured against the longest this install is known
+	// to have used, never merely the one configured now. A database
+	// that cannot answer stops the boot rather than let this replica
+	// run with a shorter one.
+	if bound, err := db.RaiseDurationSetting(context.Background(), store.SettingFeedURLTTLBound, feedTTL); err != nil {
+		log.Fatalf("feed url ttl: record %s: %v", store.SettingFeedURLTTLBound, err)
+	} else if bound > feedTTL {
+		logger.Info("feed url ttl: this install has signed longer-lived links before",
+			"configured", feedTTL, "bound", bound,
+			"hint", "lower the "+store.SettingFeedURLTTLBound+" setting once every replica runs the shorter TTL and the older links have expired")
+	}
 	usageH := handler.NewUsageHandler(usageSvc)
 	seatH := handler.NewSeatHandler(seatSvc)
 	entitlementH := handler.NewEntitlementHandler(entitlementSvc)
@@ -237,6 +349,7 @@ func main() {
 		BaseURL:     cfg.BaseURL,
 		DownloadTTL: downloadTTL,
 		FeedTTL:     feedTTL,
+		VerifyKey:   licenseSvc.SigningPublicKey(),
 	})
 	releaseSigningH := handler.NewReleaseSigningAdminHandler(releaseSigner, db)
 	publicPlansH := handler.NewPublicPlansHandler(db, logger)
@@ -335,7 +448,12 @@ func main() {
 	if cfg.IsProduction() {
 		gin.SetMode(gin.ReleaseMode)
 	}
-	r := gin.Default()
+	// gin.Default() logs the query string as it came in, and updaters
+	// that cannot set headers send the license key (or its token) as
+	// a query parameter — it would land in every log line, and from
+	// there in whatever collects them. Same engine, redacted path.
+	r := gin.New()
+	r.Use(gin.LoggerWithFormatter(redactedLogFormatter), redactedRecovery())
 
 	// Trust reverse proxy headers (Traefik, Nginx, etc.) to get real client IP.
 	// Trusts X-Forwarded-For / X-Real-Ip from private network ranges.
@@ -609,8 +727,15 @@ func main() {
 			for _, l := range licenses {
 				out = append(out, portalLicense{License: l, LicenseKey: db.DecryptLicenseKey(l)})
 			}
+			// The portal hides the renewal button while the switch is
+			// off; the endpoint refuses the sale regardless.
+			renewalsEnabled, err := db.MaintenanceFeaturesEnabled(c)
+			if err != nil {
+				response.Internal(c)
+				return
+			}
 			c.Header("Cache-Control", "no-store")
-			response.OK(c, gin.H{"licenses": out})
+			response.OK(c, gin.H{"licenses": out, "renewals_enabled": renewalsEnabled})
 		})
 		portal.PUT("/profile", func(c *gin.Context) {
 			userID, _ := c.Get("user_id")
@@ -824,6 +949,9 @@ func main() {
 		portal.POST("/subscription/cancel", stripeH.CancelSubscription)
 		portal.POST("/subscription/billing-portal", stripeH.CreatePortalSession)
 		portal.GET("/subscription/invoices", stripeH.ListInvoices)
+		// Maintenance renewal for perpetual licenses: a one-time
+		// checkout that extends updates_until.
+		portal.POST("/updates/renew", stripeH.RenewUpdates)
 	}
 
 	// Admin route layout: three groups under /admin, all sharing the
@@ -890,6 +1018,7 @@ func main() {
 		licWrite.POST("/licenses/:id/suspend", adminH.SuspendLicense)
 		licWrite.POST("/licenses/:id/reinstate", adminH.ReinstateLicense)
 		licWrite.POST("/licenses/:id/valid-until", adminH.SetLicenseValidUntil)
+		licWrite.POST("/licenses/:id/updates-until", adminH.SetLicenseUpdatesUntil)
 		licWrite.POST("/licenses/:id/change-plan", adminH.ChangeLicensePlan)
 		licWrite.GET("/licenses/:id/usage", adminH.ListLicenseUsage)
 		licWrite.POST("/licenses/:id/usage/reset", adminH.ResetLicenseUsage)

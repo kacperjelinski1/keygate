@@ -189,14 +189,18 @@ type VerifyInput struct {
 }
 
 type VerifyResult struct {
-	Status     string         `json:"status"`
-	PlanID     string         `json:"plan_id"`
-	PlanName   string         `json:"plan_name"`
-	ValidUntil *time.Time     `json:"valid_until,omitempty"`
-	Features   map[string]any `json:"features"`
-	Token      string         `json:"token"`
-	GraceDays  int            `json:"grace_days"`
-	Meta       map[string]any `json:"meta"`
+	Status     string     `json:"status"`
+	PlanID     string     `json:"plan_id"`
+	PlanName   string     `json:"plan_name"`
+	ValidUntil *time.Time `json:"valid_until,omitempty"`
+	// UpdatesUntil is the end of a perpetual license's maintenance
+	// period: releases published after it cannot be installed. Absent
+	// when the license has no separate limit.
+	UpdatesUntil *time.Time     `json:"updates_until,omitempty"`
+	Features     map[string]any `json:"features"`
+	Token        string         `json:"token"`
+	GraceDays    int            `json:"grace_days"`
+	Meta         map[string]any `json:"meta"`
 	// External identifiers echoed back so the SDK can confirm the
 	// license belongs to the workspace it expects. Empty when the
 	// license was created without them. Optional in the JSON envelope
@@ -283,6 +287,7 @@ func (s *LicenseService) Verify(ctx context.Context, in VerifyInput) (*VerifyRes
 		PlanID:              lic.PlanID,
 		PlanName:            planName,
 		ValidUntil:          lic.ValidUntil,
+		UpdatesUntil:        lic.EffectiveUpdatesUntil(),
 		Features:            s.entitlements(lic),
 		Token:               token,
 		GraceDays:           s.effectiveGraceDays(lic),
@@ -558,18 +563,24 @@ func (s *LicenseService) signToken(lic *model.License, identifier string) (strin
 		}
 	}
 
+	var updatesUntil int64
+	if u := lic.EffectiveUpdatesUntil(); u != nil {
+		updatesUntil = u.Unix()
+	}
+
 	t := &license.VerifyToken{
-		LicenseID:   lic.ID,
-		ProductID:   lic.ProductID,
-		PlanID:      lic.PlanID,
-		Status:      lic.Status,
-		Identifier:  identifier,
-		Features:    s.entitlements(lic),
-		IssuedAt:    now.Unix(),
-		ExpiresAt:   expiresAt.Unix(),
-		ValidUntil:  validUntil,
-		GraceDays:   grace,
-		Fingerprint: license.Fingerprint(identifier, lic.ProductID),
+		LicenseID:    lic.ID,
+		ProductID:    lic.ProductID,
+		PlanID:       lic.PlanID,
+		Status:       lic.Status,
+		Identifier:   identifier,
+		Features:     s.entitlements(lic),
+		IssuedAt:     now.Unix(),
+		ExpiresAt:    expiresAt.Unix(),
+		ValidUntil:   validUntil,
+		UpdatesUntil: updatesUntil,
+		GraceDays:    grace,
+		Fingerprint:  license.Fingerprint(identifier, lic.ProductID),
 	}
 	return license.Sign(t, s.signingKey)
 }

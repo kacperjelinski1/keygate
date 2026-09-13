@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"encoding/csv"
 	"encoding/json"
 	"errors"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/stripe/stripe-go/v82/subscription"
+	"github.com/uptrace/bun"
 
 	"github.com/tabloy/keygate/internal/license"
 	"github.com/tabloy/keygate/internal/model"
@@ -29,6 +31,332 @@ type AdminHandler struct {
 	Email   *service.EmailService
 	Expiry  *service.ExpiryChecker
 	Metered *service.MeteredBillingSyncer
+	// FeedURLTTL is how long a presigned artifact URL inside a public
+	// update feed stays usable (STORAGE_FEED_URL_TTL). Gating a
+	// product's feeds does not reach links already handed out, so an
+	// update period may only be configured once they have expired —
+	// this is what that wait is measured against. Lower it and the
+	// wait shortens, but only for links signed from then on: after
+	// lowering it, leave the maintenance features off until the
+	// longer-lived links are gone.
+	FeedURLTTL time.Duration
+	// beforeCutoffWrite runs between reading a license (and the plan
+	// or product it points at) and the transaction that writes it.
+	// Tests use it to commit a change in that window; nil everywhere
+	// else.
+	beforeCutoffWrite func()
+}
+
+// feedNotGated refuses a maintenance change on a product
+// whose update feeds are still public: the feed would hand a lapsed
+// customer the newer releases, so the period would restrict only
+// /license/download. Products that ship no releases have no feed to
+// gate. The reverse — turning gating off while such plans exist — is
+// refused in UpdateProduct.
+func (h *AdminHandler) feedNotGated(c *gin.Context, prod *model.Product) bool {
+	problem, err := h.feedGateCheck(c, h.Store.DB, prod)
+	return h.writeFeedGateProblem(c, problem, err)
+}
+
+// feedGateProblem is a refusal a maintenance write earns from the
+// product's feed gating state. It travels as an error so the check
+// can run inside the transaction that holds the gating lock.
+type feedGateProblem struct {
+	code    string
+	message string
+	details gin.H
+}
+
+func (p *feedGateProblem) Error() string { return p.message }
+
+// writeFeedGateProblem answers a refusal (409) or a failed check
+// (500) and reports whether it wrote anything.
+func (h *AdminHandler) writeFeedGateProblem(c *gin.Context, problem *feedGateProblem, err error) bool {
+	if err != nil {
+		response.Internal(c)
+		return true
+	}
+	if problem == nil {
+		return false
+	}
+	response.Conflict(c, problem.code, problem.message, problem.details)
+	return true
+}
+
+// feedGateCheck reports why a plan or license with an update period
+// may not be written for this product, or nil when it may.
+func (h *AdminHandler) feedGateCheck(ctx context.Context, db bun.IDB, prod *model.Product) (*feedGateProblem, error) {
+	if !model.ProductSupports(prod.Type, model.CapReleases) {
+		return nil, nil
+	}
+	if !prod.FeedLicenseRequired {
+		return &feedGateProblem{"FEED_NOT_GATED",
+			"a plan with an update period or renewals needs the product's update feeds to require the license key (feed_license_required); the public feed would otherwise serve releases past the period",
+			gin.H{"product_id": prod.ID}}, nil
+	}
+	return h.feedDrainCheck(ctx, db, prod)
+}
+
+// lockFeedGateIn takes the product's feed gating lock for this
+// transaction and re-reads the gating state under it, answering why
+// the write must be refused or nil. Checking outside the lock is not enough: an ungate and a
+// re-gate committing in between restart the drain, and the trigger
+// that guards the write sees only that the gate is on, so a period
+// would be set while links from the public interval are still valid.
+// Callers lock the row they are about to write first (see
+// store.LockLicenseIn and friends): the triggers take this lock while
+// the row they fire for is already locked, so reaching for it in the
+// other order would deadlock against them.
+func (h *AdminHandler) lockFeedGateIn(ctx context.Context, tx bun.Tx, productID string) (*feedGateProblem, error) {
+	if err := store.FeedGatingLockIn(ctx, tx, productID); err != nil {
+		return nil, err
+	}
+	prod, err := store.FindProductByIDIn(ctx, tx, productID)
+	if err != nil {
+		return nil, err
+	}
+	return h.feedGateCheck(ctx, tx, prod)
+}
+
+// createPlan and updatePlan write the plan, under the product's feed
+// gating lock when the plan sells an update period or renewals: the
+// gating state read before the write must still hold when it lands.
+func (h *AdminHandler) createPlan(c *gin.Context, p *model.Plan, needsGatedFeed bool) error {
+	if !needsGatedFeed {
+		return h.Store.CreatePlan(c, p)
+	}
+	h.Store.FillPlanIDs(p)
+	return h.Store.RunInTx(c, func(ctx context.Context, tx bun.Tx) error {
+		if problem, err := h.maintenanceSwitchOff(ctx, tx); err != nil || problem != nil {
+			return firstNonNil(err, problem)
+		}
+		// The row this insert references first, the gate after.
+		if err := store.LockReferencedRowsIn(ctx, tx, "", p.ProductID); err != nil {
+			return err
+		}
+		problem, err := h.lockFeedGateIn(ctx, tx, p.ProductID)
+		if err != nil {
+			return err
+		}
+		if problem != nil {
+			return problem
+		}
+		return store.CreatePlanIn(ctx, tx, p)
+	})
+}
+
+// invalidTermsError: the maintenance fields the request asks for do
+// not hold together once merged with the plan under its lock.
+type invalidTermsError struct{ msg string }
+
+func (e *invalidTermsError) Error() string { return e.msg }
+
+// planTermsRequest is what a plan update asked of the maintenance
+// fields: nil means "not in this request", so the value under the
+// plan's lock is kept rather than the snapshot this handler read.
+type planTermsRequest struct {
+	UpdatesDays          *int
+	RenewalDays          *int
+	StripeRenewalPriceID *string
+	LicenseType          *string
+}
+
+// carried reports whether the request touched the maintenance fields
+// at all — directly, or through a licence type that renormalises them.
+func (t planTermsRequest) carried() bool {
+	return t.UpdatesDays != nil || t.RenewalDays != nil || t.StripeRenewalPriceID != nil || t.LicenseType != nil
+}
+
+// mergeTermsIn rebuilds the maintenance fields from the plan as it
+// reads under the lock plus what this request asked for. Two requests
+// changing different fields would otherwise write each other's back:
+// each holds a snapshot taken before the lock.
+func mergeTermsIn(ctx context.Context, tx bun.Tx, p *model.Plan, terms planTermsRequest) (locked *model.Plan, changed bool, err error) {
+	locked, err = store.FindPlanByIDIn(ctx, tx, p.ID)
+	if err != nil {
+		return nil, false, err
+	}
+	licenseType := locked.LicenseType
+	if terms.LicenseType != nil {
+		licenseType = *terms.LicenseType
+	}
+	in := maintenanceFields{
+		UpdatesDays:          locked.UpdatesDays,
+		RenewalDays:          locked.RenewalDays,
+		StripeRenewalPriceID: locked.StripeRenewalPriceID,
+	}
+	if terms.UpdatesDays != nil {
+		in.UpdatesDays = *terms.UpdatesDays
+	}
+	if terms.RenewalDays != nil {
+		in.RenewalDays = *terms.RenewalDays
+	}
+	if terms.StripeRenewalPriceID != nil {
+		in.StripeRenewalPriceID = *terms.StripeRenewalPriceID
+	}
+	merged, err := normalizeMaintenance(licenseType, in)
+	if err != nil {
+		// The merge is what the request really asks for, so this is a
+		// validation failure like any other — answered 400, not 409.
+		return locked, false, &invalidTermsError{err.Error()}
+	}
+	changed = merged.UpdatesDays != locked.UpdatesDays ||
+		merged.RenewalDays != locked.RenewalDays ||
+		merged.StripeRenewalPriceID != locked.StripeRenewalPriceID
+	p.UpdatesDays, p.RenewalDays, p.StripeRenewalPriceID = merged.UpdatesDays, merged.RenewalDays, merged.StripeRenewalPriceID
+	return locked, changed, nil
+}
+
+func (h *AdminHandler) updatePlan(c *gin.Context, p *model.Plan, needsGatedFeed, typeChanged bool, terms planTermsRequest, cols []string) error {
+	if len(cols) == 0 {
+		return nil
+	}
+	if !needsGatedFeed && !typeChanged && !terms.carried() {
+		return h.Store.UpdatePlan(c, p, cols...)
+	}
+	return h.Store.RunInTx(c, func(ctx context.Context, tx bun.Tx) error {
+		// The row lock is what a license insert's foreign key waits
+		// on, so a fulfilment either got its license in before this
+		// (and the count below refuses the change) or blocks until
+		// the new type is committed and builds from that. Rows in the
+		// same order everywhere — plan, then product — and the gate
+		// after both.
+		if err := store.LockPlanIn(ctx, tx, p.ID); err != nil {
+			return err
+		}
+		if err := store.LockReferencedRowsIn(ctx, tx, "", p.ProductID); err != nil {
+			return err
+		}
+		// The maintenance fields are decided here, on the plan as it
+		// reads under the lock: what this request asked for over what
+		// is there now, not over the snapshot it started from.
+		var locked *model.Plan
+		termsMoved := false
+		if terms.carried() {
+			var err error
+			if locked, termsMoved, err = mergeTermsIn(ctx, tx, p, terms); err != nil {
+				return err
+			}
+		}
+		// Whether this is a type change is decided against the plan
+		// under the lock, not the snapshot: a request that reads
+		// "perpetual" and writes "perpetual" is a change if another
+		// one turned it into a subscription in between — and the
+		// licences that appeared under that type would be left with
+		// the wrong shape.
+		if terms.LicenseType != nil && locked != nil && *terms.LicenseType != locked.LicenseType {
+			n, err := store.PlanLicenseCountIn(ctx, tx, p.ID)
+			if err != nil {
+				return err
+			}
+			if n > 0 {
+				return store.ErrPlanHasLicenses
+			}
+		}
+		// The switch is what stops new terms being sold, so it is
+		// consulted when this write actually moves them — repeating
+		// the values the plan already has is not a sale.
+		sellsTerms := p.UpdatesDays > 0 || p.RenewalDays > 0 || p.StripeRenewalPriceID != ""
+		if termsMoved && sellsTerms {
+			if problem, err := h.maintenanceSwitchOff(ctx, tx); err != nil || problem != nil {
+				return firstNonNil(err, problem)
+			}
+		}
+		if p.UpdatesDays > 0 || p.StripeRenewalPriceID != "" {
+			problem, err := h.lockFeedGateIn(ctx, tx, p.ProductID)
+			if err != nil {
+				return err
+			}
+			if problem != nil {
+				return problem
+			}
+		}
+		return store.UpdatePlanIn(ctx, tx, p, cols...)
+	})
+}
+
+// firstNonNil returns err when it is set, otherwise the problem (as
+// an error) — the shape every "check, then write" step inside a
+// transaction returns.
+func firstNonNil(err error, problem *feedGateProblem) error {
+	if err != nil {
+		return err
+	}
+	if problem != nil {
+		return problem
+	}
+	return nil
+}
+
+// maintenanceSwitchOff reports the rollout confirmation as a refusal
+// the caller can return from inside its transaction: the check before
+// the write is cheap and gives the usual message, but the switch can
+// go off between the two.
+func (h *AdminHandler) maintenanceSwitchOff(ctx context.Context, tx bun.IDB) (*feedGateProblem, error) {
+	on, err := store.MaintenanceFeaturesEnabledForWriteIn(ctx, tx)
+	if err != nil || on {
+		return nil, err
+	}
+	return &feedGateProblem{"MAINTENANCE_FEATURES_DISABLED",
+		"maintenance-period features are switched off: finish rolling every replica to this version, then enable them in Settings (" + store.SettingMaintenanceFeatures + ")", nil}, nil
+}
+
+// feedGateRefused answers a refusal that came back from withFeedGate
+// and reports whether it wrote the response.
+func feedGateRefused(c *gin.Context, err error) bool {
+	var problem *feedGateProblem
+	if errors.As(err, &problem) {
+		response.Conflict(c, problem.code, problem.message, problem.details)
+		return true
+	}
+	return false
+}
+
+// feedDrainPending reports whether what the product's public feeds
+// already handed out could still be used. The gate does not reach
+// those: a shared cache may serve the feed for its max-age, and every
+// copy of it carries presigned artifact URLs that stay valid for
+// their own lifetime. Until the longer of the two has passed since
+// the gate went up, a customer could fetch a release a cutoff
+// excludes. A product that never published a release handed out
+// nothing and needs no wait. Writes the response when it refuses.
+func (h *AdminHandler) feedDrainPending(c *gin.Context, prod *model.Product) bool {
+	problem, err := h.feedDrainCheck(c, h.Store.DB, prod)
+	return h.writeFeedGateProblem(c, problem, err)
+}
+
+func (h *AdminHandler) feedDrainCheck(ctx context.Context, db bun.IDB, prod *model.Product) (*feedGateProblem, error) {
+	// The link lifetime comes from the shared bound, so a replica
+	// started with a shorter TTL than one of its peers cannot let the
+	// wait end early; this replica's own configuration is only the
+	// fallback.
+	drain, left, err := store.FeedDrainLeftIn(ctx, db, prod, h.FeedURLTTL)
+	if err != nil {
+		return nil, err
+	}
+	if left <= 0 {
+		return nil, nil
+	}
+	return &feedGateProblem{"FEED_CACHE_DRAINING",
+		fmt.Sprintf("the update feeds were gated %s ago; download links handed out by the public feed stay valid for %s, so an update period can be set in %s (lower STORAGE_FEED_URL_TTL to reduce this)",
+			time.Since(*prod.FeedGatedAt).Round(time.Second), drain, left.Round(time.Second)),
+		gin.H{"product_id": prod.ID, "retry_after_seconds": int(left.Seconds()) + 1}}, nil
+}
+
+// maintenanceGated answers 409 while the switch is off. A settings
+// read failure is an error, not an open gate.
+func (h *AdminHandler) maintenanceGated(c *gin.Context) bool {
+	on, err := h.Store.MaintenanceFeaturesEnabled(c)
+	if err != nil {
+		response.Internal(c)
+		return true
+	}
+	if on {
+		return false
+	}
+	response.Conflict(c, "MAINTENANCE_FEATURES_DISABLED",
+		"maintenance-period features are switched off: finish rolling every replica to this version, then enable them in Settings ("+store.SettingMaintenanceFeatures+")", nil)
+	return true
 }
 
 func NewAdminHandler(s *store.Store, wh *service.WebhookService, em *service.EmailService, ex *service.ExpiryChecker, ms *service.MeteredBillingSyncer) *AdminHandler {
@@ -118,17 +446,25 @@ func (h *AdminHandler) UpdateProduct(c *gin.Context) {
 		MinimumSupportedVersion *string `json:"minimum_supported_version"`
 		MinimumSupportedMessage *string `json:"minimum_supported_message"`
 		RequireSigning          *bool   `json:"require_signing"`
+		FeedLicenseRequired     *bool   `json:"feed_license_required"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		response.BadRequest(c, "invalid request body")
 		return
 	}
+	// Only the columns this request carries are written. A whole-row
+	// write would put back everything the snapshot above holds, and a
+	// concurrent change — an ungate and re-gate in particular, whose
+	// timestamp decides how long the feeds must drain — would be
+	// silently undone by an unrelated rename.
+	cols := []string{}
 	if req.Name != "" {
 		if err := apperr.ValidateName("name", req.Name); err != nil {
 			response.BadRequest(c, err.Message)
 			return
 		}
 		p.Name = req.Name
+		cols = append(cols, "name")
 	}
 	if req.Slug != "" {
 		if err := apperr.ValidateSlug(req.Slug); err != nil {
@@ -136,7 +472,9 @@ func (h *AdminHandler) UpdateProduct(c *gin.Context) {
 			return
 		}
 		p.Slug = req.Slug
+		cols = append(cols, "slug")
 	}
+	prevType := p.Type
 	if req.Type != "" {
 		if req.Type != "desktop" && req.Type != "saas" && req.Type != "hybrid" {
 			response.BadRequest(c, "type must be desktop, saas, or hybrid")
@@ -179,6 +517,7 @@ func (h *AdminHandler) UpdateProduct(c *gin.Context) {
 			}
 		}
 		p.Type = req.Type
+		cols = append(cols, "type")
 	}
 	if req.MinimumSupportedVersion != nil {
 		v := strings.TrimSpace(*req.MinimumSupportedVersion)
@@ -189,6 +528,7 @@ func (h *AdminHandler) UpdateProduct(c *gin.Context) {
 			}
 		}
 		p.MinimumSupportedVersion = v
+		cols = append(cols, "minimum_supported_version")
 	}
 	if req.MinimumSupportedMessage != nil {
 		msg := strings.TrimSpace(*req.MinimumSupportedMessage)
@@ -197,13 +537,141 @@ func (h *AdminHandler) UpdateProduct(c *gin.Context) {
 			return
 		}
 		p.MinimumSupportedMessage = msg
+		cols = append(cols, "minimum_supported_message")
 	}
 	if req.RequireSigning != nil {
 		p.RequireSigning = *req.RequireSigning
+		cols = append(cols, "require_signing")
+	}
+	wasGated, wasReleases := p.FeedLicenseRequired, model.ProductSupports(prevType, model.CapReleases)
+	// gatingNow marks a request that switches the gate on. The instant
+	// it went up is written by the database when the row is written,
+	// not read from this replica's clock before the transaction: the
+	// public feed keeps serving until the write commits, and replicas
+	// need not agree on the time.
+	gatingNow := false
+	if req.FeedLicenseRequired != nil {
+		if *req.FeedLicenseRequired && !p.FeedLicenseRequired {
+			if h.maintenanceGated(c) {
+				return
+			}
+			gatingNow = true
+			now := time.Now()
+			p.FeedGatedAt = &now
+		}
+		p.FeedLicenseRequired = *req.FeedLicenseRequired
+		cols = append(cols, "feed_license_required")
+	}
+	// The product must not end up release-capable with public feeds
+	// while anything the feed gate protects exists — whether the gate
+	// was switched off, or a saas product (no feed, so no gate needed)
+	// became a desktop or hybrid one. The database trigger holds the
+	// same rule for concurrent writes.
+	if model.ProductSupports(p.Type, model.CapReleases) && !p.FeedLicenseRequired && (wasGated || !wasReleases) {
+		has, err := h.Store.ProductHasMaintenance(c, p.ID)
+		if err != nil {
+			response.Internal(c)
+			return
+		}
+		if has && !wasReleases {
+			response.Conflict(c, "FEED_NOT_GATED",
+				"this product has plans or licenses with an update period; enable feed_license_required in the same change so its new update feeds require the license key", nil)
+			return
+		}
+		if has {
+			response.Conflict(c, "BOUNDED_PLANS_EXIST",
+				"update feeds must keep requiring the license key while a plan of this product sells an update period or renewals, or a license still has an update cutoff", nil)
+			return
+		}
+	}
+	// Giving a product its feeds back is the same exposure as gating
+	// them: links handed out while it last served public feeds keep
+	// working. A saas product serves no feed, so periods may be set
+	// on it freely; turning it back into a desktop or hybrid one must
+	// therefore wait out those links, not just switch the gate on.
+	// Whether anything the feed gate protects exists is decided under
+	// the product's row lock inside the write: a bounded plan or a
+	// cutoff may be created on a saas product at any moment — it
+	// serves no feed — and one created after a check out here would
+	// otherwise get its feeds back without the wait.
+	restoringFeeds := !wasReleases && model.ProductSupports(p.Type, model.CapReleases) && p.FeedLicenseRequired
+	if h.beforeCutoffWrite != nil {
+		h.beforeCutoffWrite()
 	}
 
-	if err := h.Store.UpdateProduct(c, p); err != nil {
+	// The write happens under the gating lock with the drain checked
+	// there: the gate could be switched off and on again between a
+	// check and the write, which restarts it.
+	//
+	// Set when the gate was saved but the type change has to wait for
+	// the drain: that half of the request commits, so it travels
+	// beside the transaction rather than as its error.
+	var waiting *feedGateProblem
+	err = h.Store.RunInTx(c, func(ctx context.Context, tx bun.Tx) error {
+		// Row first, then the gate: the order the triggers use.
+		fresh, err := store.LockProductIn(ctx, tx, p.ID)
+		if err != nil {
+			return err
+		}
+		if err := store.FeedGatingLockIn(ctx, tx, p.ID); err != nil {
+			return err
+		}
+		rest := cols
+		if gatingNow {
+			// The gate goes up in its own statement so the instant it
+			// went up is the database's, and so it survives even when
+			// the rest of the request is refused below.
+			if err := store.UpdateProductGatingNowIn(ctx, tx, p, "feed_license_required"); err != nil {
+				return err
+			}
+			rest = slices.DeleteFunc(slices.Clone(cols), func(c string) bool { return c == "feed_license_required" })
+		} else {
+			// Never write back the instant this request read: another
+			// one may have re-gated since, and the wait runs from that.
+			p.FeedGatedAt = fresh.FeedGatedAt
+		}
+		if restoringFeeds {
+			has, err := store.ProductHasMaintenanceIn(ctx, tx, p.ID)
+			if err != nil {
+				return err
+			}
+			if !has {
+				return store.UpdateProductIn(ctx, tx, p, rest...)
+			}
+			problem, err := h.feedDrainCheck(ctx, tx, p)
+			if err != nil {
+				return err
+			}
+			if problem != nil {
+				// The type change waits. Only the gate was written —
+				// the rest of the request is refused with it, so a
+				// caller reading the 409 as "nothing happened" is
+				// wrong about one thing only, and the message says
+				// which. Leaving the gate in memory alone would
+				// restart the wait on every retry and the product
+				// could never get its feeds back.
+				problem.message = "the update feeds now require the license key and only that was saved; the type change and any other field in this request were not applied: " + problem.message
+				waiting = problem
+				return nil
+			}
+		}
+		if len(rest) == 0 {
+			return nil
+		}
+		return store.UpdateProductIn(ctx, tx, p, rest...)
+	})
+	if err != nil {
+		if feedGateRefused(c, err) {
+			return
+		}
+		if feedGateConflict(c, err) {
+			return
+		}
 		response.Internal(c)
+		return
+	}
+	if waiting != nil {
+		response.Conflict(c, waiting.code, waiting.message, waiting.details)
 		return
 	}
 	response.OK(c, p)
@@ -264,6 +732,41 @@ func normalizeBillingInterval(licenseType, interval string) (string, error) {
 	return interval, nil
 }
 
+// maintenanceFields are the plan fields that describe a perpetual
+// license's update period and how more of it is sold.
+type maintenanceFields struct {
+	UpdatesDays          int
+	RenewalDays          int
+	StripeRenewalPriceID string
+}
+
+// normalizeMaintenance validates the maintenance fields against the
+// license type. Only perpetual licenses have a separate update
+// period; on every other type the fields are cleared, mirroring the
+// billing interval. A renewal price without a renewal length would
+// sell nothing, so the pair is required together.
+func normalizeMaintenance(licenseType string, m maintenanceFields) (maintenanceFields, error) {
+	if licenseType != "perpetual" {
+		return maintenanceFields{}, nil
+	}
+	m.StripeRenewalPriceID = strings.TrimSpace(m.StripeRenewalPriceID)
+	switch {
+	case m.UpdatesDays < 0:
+		return m, errors.New("updates_days cannot be negative")
+	case m.UpdatesDays > 3650:
+		return m, errors.New("updates_days cannot exceed 3650")
+	case m.RenewalDays < 0:
+		return m, errors.New("renewal_days cannot be negative")
+	case m.RenewalDays > 3650:
+		return m, errors.New("renewal_days cannot exceed 3650")
+	case m.StripeRenewalPriceID != "" && m.RenewalDays == 0:
+		return m, errors.New("renewal_days is required when stripe_renewal_price_id is set")
+	case m.StripeRenewalPriceID != "" && !strings.HasPrefix(m.StripeRenewalPriceID, "price_"):
+		return m, errors.New("stripe_renewal_price_id must be a Stripe price id (price_...)")
+	}
+	return m, nil
+}
+
 func (h *AdminHandler) CreatePlan(c *gin.Context) {
 	var req struct {
 		ProductID       string `json:"product_id" binding:"required"`
@@ -277,12 +780,15 @@ func (h *AdminHandler) CreatePlan(c *gin.Context) {
 		// Pointers so "omitted" (use the default) and an explicit 0
 		// ("no grace", "no timeout") stay distinguishable. Before, a
 		// zero-grace plan could only be made with a second PUT.
-		GraceDays       *int   `json:"grace_days"`
-		StripePriceID   string `json:"stripe_price_id"`
-		LicenseModel    string `json:"license_model"`
-		FloatingTimeout *int   `json:"floating_timeout"`
-		TokenTTLDays    int    `json:"token_ttl_days"`
-		SortOrder       int    `json:"sort_order"`
+		GraceDays            *int   `json:"grace_days"`
+		StripePriceID        string `json:"stripe_price_id"`
+		UpdatesDays          int    `json:"updates_days"`
+		RenewalDays          int    `json:"renewal_days"`
+		StripeRenewalPriceID string `json:"stripe_renewal_price_id"`
+		LicenseModel         string `json:"license_model"`
+		FloatingTimeout      *int   `json:"floating_timeout"`
+		TokenTTLDays         int    `json:"token_ttl_days"`
+		SortOrder            int    `json:"sort_order"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		response.BadRequest(c, "product_id, name, slug, and license_type are required")
@@ -305,6 +811,13 @@ func (h *AdminHandler) CreatePlan(c *gin.Context) {
 		return
 	}
 	billingInterval, err := normalizeBillingInterval(req.LicenseType, req.BillingInterval)
+	if err != nil {
+		response.BadRequest(c, err.Error())
+		return
+	}
+	maint, err := normalizeMaintenance(req.LicenseType, maintenanceFields{
+		UpdatesDays: req.UpdatesDays, RenewalDays: req.RenewalDays, StripeRenewalPriceID: req.StripeRenewalPriceID,
+	})
 	if err != nil {
 		response.BadRequest(c, err.Error())
 		return
@@ -380,30 +893,46 @@ func (h *AdminHandler) CreatePlan(c *gin.Context) {
 		return
 	}
 
-	if h.stripePriceTaken(c, req.StripePriceID, "") {
+	if h.stripePricesTaken(c, req.StripePriceID, maint.StripeRenewalPriceID, "") {
+		return
+	}
+	needsGatedFeed := maint.UpdatesDays > 0 || maint.StripeRenewalPriceID != ""
+	if needsGatedFeed && h.maintenanceGated(c) {
+		return
+	}
+	if needsGatedFeed && h.feedNotGated(c, prod) {
 		return
 	}
 
 	p := &model.Plan{
-		ProductID:       req.ProductID,
-		Name:            req.Name,
-		Slug:            req.Slug,
-		LicenseType:     req.LicenseType,
-		BillingInterval: billingInterval,
-		MaxActivations:  req.MaxActivations,
-		MaxSeats:        req.MaxSeats,
-		TrialDays:       req.TrialDays,
-		GraceDays:       graceDays,
-		StripePriceID:   req.StripePriceID,
-		LicenseModel:    licenseModel,
-		FloatingTimeout: floatingTimeout,
-		TokenTTLDays:    req.TokenTTLDays,
-		Active:          true,
-		SortOrder:       req.SortOrder,
+		ProductID:            req.ProductID,
+		Name:                 req.Name,
+		Slug:                 req.Slug,
+		LicenseType:          req.LicenseType,
+		BillingInterval:      billingInterval,
+		MaxActivations:       req.MaxActivations,
+		MaxSeats:             req.MaxSeats,
+		TrialDays:            req.TrialDays,
+		GraceDays:            graceDays,
+		StripePriceID:        req.StripePriceID,
+		UpdatesDays:          maint.UpdatesDays,
+		RenewalDays:          maint.RenewalDays,
+		StripeRenewalPriceID: maint.StripeRenewalPriceID,
+		LicenseModel:         licenseModel,
+		FloatingTimeout:      floatingTimeout,
+		TokenTTLDays:         req.TokenTTLDays,
+		Active:               true,
+		SortOrder:            req.SortOrder,
 	}
-	if err := h.Store.CreatePlan(c, p); err != nil {
+	if err := h.createPlan(c, p, needsGatedFeed); err != nil {
+		if feedGateRefused(c, err) {
+			return
+		}
 		if isStripePriceConflict(err) {
 			response.Err(c, http.StatusConflict, "STRIPE_PRICE_IN_USE", "stripe_price_id is already used by another plan")
+			return
+		}
+		if feedGateConflict(c, err) {
 			return
 		}
 		response.Err(c, http.StatusConflict, "DUPLICATE", "plan slug already exists for this product")
@@ -427,20 +956,23 @@ func (h *AdminHandler) UpdatePlan(c *gin.Context) {
 	}
 
 	var req struct {
-		Name            *string `json:"name"`
-		Slug            *string `json:"slug"`
-		LicenseType     *string `json:"license_type"`
-		BillingInterval *string `json:"billing_interval"`
-		MaxActivations  *int    `json:"max_activations"`
-		MaxSeats        *int    `json:"max_seats"`
-		TrialDays       *int    `json:"trial_days"`
-		GraceDays       *int    `json:"grace_days"`
-		StripePriceID   *string `json:"stripe_price_id"`
-		LicenseModel    *string `json:"license_model"`
-		FloatingTimeout *int    `json:"floating_timeout"`
-		TokenTTLDays    *int    `json:"token_ttl_days"`
-		Active          *bool   `json:"active"`
-		SortOrder       *int    `json:"sort_order"`
+		Name                 *string `json:"name"`
+		Slug                 *string `json:"slug"`
+		LicenseType          *string `json:"license_type"`
+		BillingInterval      *string `json:"billing_interval"`
+		MaxActivations       *int    `json:"max_activations"`
+		MaxSeats             *int    `json:"max_seats"`
+		TrialDays            *int    `json:"trial_days"`
+		GraceDays            *int    `json:"grace_days"`
+		StripePriceID        *string `json:"stripe_price_id"`
+		UpdatesDays          *int    `json:"updates_days"`
+		RenewalDays          *int    `json:"renewal_days"`
+		StripeRenewalPriceID *string `json:"stripe_renewal_price_id"`
+		LicenseModel         *string `json:"license_model"`
+		FloatingTimeout      *int    `json:"floating_timeout"`
+		TokenTTLDays         *int    `json:"token_ttl_days"`
+		Active               *bool   `json:"active"`
+		SortOrder            *int    `json:"sort_order"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		response.BadRequest(c, "invalid request body")
@@ -479,12 +1011,36 @@ func (h *AdminHandler) UpdatePlan(c *gin.Context) {
 	// UPDATE could persist arbitrary strings (e.g. "free", "pro") that
 	// downstream branching (trial-only logic, billing routing) would
 	// silently treat as the default branch.
+	typeChanged := false
 	if req.LicenseType != nil {
 		switch *req.LicenseType {
 		case "subscription", "perpetual", "trial":
 		default:
 			response.BadRequest(c, "license_type must be subscription, perpetual, or trial")
 			return
+		}
+		// Licenses take their period, billing and update rules from
+		// the plan's type; changing it under them would leave every
+		// existing license with the wrong state (a subscription
+		// license has no update period, a perpetual one no Stripe
+		// subscription). Move the licenses to another plan first.
+		// The count is only worth trusting when it cannot change
+		// before the write: a fulfilment holding a stale copy of the
+		// plan would otherwise create the first license — with the
+		// subscription row the old type implies — just after the
+		// count came back zero. Re-checked under the plan's row lock
+		// in the write transaction below; this one keeps the common
+		// refusal cheap and its message unchanged.
+		typeChanged = *req.LicenseType != p.LicenseType
+		if typeChanged {
+			if n, err := h.Store.PlanLicenseCount(c, p.ID); err != nil {
+				response.Internal(c)
+				return
+			} else if n > 0 {
+				response.Err(c, http.StatusConflict, "HAS_LICENSES",
+					"cannot change the license type of a plan that has licenses; move them to another plan first")
+				return
+			}
 		}
 	}
 	// The interval is checked against the license type the row will
@@ -499,6 +1055,21 @@ func (h *AdminHandler) UpdatePlan(c *gin.Context) {
 		billingInterval = *req.BillingInterval
 	}
 	billingInterval, err = normalizeBillingInterval(licenseType, billingInterval)
+	if err != nil {
+		response.BadRequest(c, err.Error())
+		return
+	}
+	maintIn := maintenanceFields{UpdatesDays: p.UpdatesDays, RenewalDays: p.RenewalDays, StripeRenewalPriceID: p.StripeRenewalPriceID}
+	if req.UpdatesDays != nil {
+		maintIn.UpdatesDays = *req.UpdatesDays
+	}
+	if req.RenewalDays != nil {
+		maintIn.RenewalDays = *req.RenewalDays
+	}
+	if req.StripeRenewalPriceID != nil {
+		maintIn.StripeRenewalPriceID = *req.StripeRenewalPriceID
+	}
+	maint, err := normalizeMaintenance(licenseType, maintIn)
 	if err != nil {
 		response.BadRequest(c, err.Error())
 		return
@@ -537,53 +1108,130 @@ func (h *AdminHandler) UpdatePlan(c *gin.Context) {
 		return
 	}
 
+	// Only the columns this request carries are written. A whole-row
+	// write would put the snapshot read above back, so an edit of an
+	// unrelated field could silently restore update terms another
+	// request had just changed — or wipe ones it had just set.
+	cols := []string{}
 	if req.Name != nil {
 		p.Name = *req.Name
+		cols = append(cols, "name")
 	}
 	if req.Slug != nil {
 		p.Slug = *req.Slug
+		cols = append(cols, "slug")
 	}
 	if req.LicenseType != nil {
 		p.LicenseType = *req.LicenseType
+		cols = append(cols, "license_type")
+	}
+	// The interval follows the licence type, so it is written
+	// whenever either of them is in the request.
+	if req.BillingInterval != nil || req.LicenseType != nil {
+		cols = append(cols, "billing_interval")
 	}
 	p.BillingInterval = billingInterval
+	// What the plan sold before this request, for the rollout fence
+	// below.
+	prevDays, prevRenewalDays, prevRenewalPrice := p.UpdatesDays, p.RenewalDays, p.StripeRenewalPriceID
+	p.UpdatesDays, p.RenewalDays, p.StripeRenewalPriceID = maint.UpdatesDays, maint.RenewalDays, maint.StripeRenewalPriceID
+	// The three travel together: normalising them depends on the
+	// licence type, so a type change rewrites them too.
+	if req.UpdatesDays != nil || req.RenewalDays != nil || req.StripeRenewalPriceID != nil || req.LicenseType != nil {
+		cols = append(cols, "updates_days", "renewal_days", "stripe_renewal_price_id")
+	}
 	if req.MaxActivations != nil {
 		p.MaxActivations = *req.MaxActivations
+		cols = append(cols, "max_activations")
 	}
 	if req.MaxSeats != nil {
 		p.MaxSeats = *req.MaxSeats
+		cols = append(cols, "max_seats")
 	}
 	if req.TrialDays != nil {
 		p.TrialDays = *req.TrialDays
+		cols = append(cols, "trial_days")
 	}
 	if req.GraceDays != nil {
 		p.GraceDays = *req.GraceDays
+		cols = append(cols, "grace_days")
 	}
+	purchasePrice := p.StripePriceID
 	if req.StripePriceID != nil {
-		if h.stripePriceTaken(c, *req.StripePriceID, p.ID) {
-			return
-		}
-		p.StripePriceID = *req.StripePriceID
+		purchasePrice = *req.StripePriceID
+	}
+	if h.stripePricesTaken(c, purchasePrice, maint.StripeRenewalPriceID, p.ID) {
+		return
+	}
+	// While the switch is off a replica that predates this version may
+	// be running, and it enforces none of this: any write that leaves
+	// the plan selling an update period or renewals is refused, not
+	// only the one that starts them. Clearing them all is what an
+	// operator does to make a rollback safe, so that stays allowed.
+	termsChanged := maint.UpdatesDays != prevDays ||
+		maint.RenewalDays != prevRenewalDays ||
+		maint.StripeRenewalPriceID != prevRenewalPrice
+	sellsTerms := maint.UpdatesDays > 0 || maint.RenewalDays > 0 || maint.StripeRenewalPriceID != ""
+	if termsChanged && sellsTerms && h.maintenanceGated(c) {
+		return
+	}
+	needsGatedFeed := maint.UpdatesDays > 0 || maint.StripeRenewalPriceID != ""
+	if needsGatedFeed && h.feedNotGated(c, prod) {
+		return
+	}
+	p.StripePriceID = purchasePrice
+	if req.StripePriceID != nil {
+		cols = append(cols, "stripe_price_id")
 	}
 	if req.LicenseModel != nil {
 		p.LicenseModel = *req.LicenseModel
+		cols = append(cols, "license_model")
 	}
 	if req.FloatingTimeout != nil {
 		p.FloatingTimeout = *req.FloatingTimeout
+		cols = append(cols, "floating_timeout")
 	}
 	if req.TokenTTLDays != nil {
 		p.TokenTTLDays = *req.TokenTTLDays
+		cols = append(cols, "token_ttl_days")
 	}
 	if req.Active != nil {
 		p.Active = *req.Active
+		cols = append(cols, "active")
 	}
 	if req.SortOrder != nil {
 		p.SortOrder = *req.SortOrder
+		cols = append(cols, "sort_order")
 	}
 
-	if err := h.Store.UpdatePlan(c, p); err != nil {
+	if h.beforeCutoffWrite != nil {
+		h.beforeCutoffWrite()
+	}
+	terms := planTermsRequest{
+		UpdatesDays:          req.UpdatesDays,
+		RenewalDays:          req.RenewalDays,
+		StripeRenewalPriceID: req.StripeRenewalPriceID,
+		LicenseType:          req.LicenseType,
+	}
+	if err := h.updatePlan(c, p, needsGatedFeed, typeChanged, terms, cols); err != nil {
+		var invalid *invalidTermsError
+		if errors.As(err, &invalid) {
+			response.BadRequest(c, invalid.msg)
+			return
+		}
+		if errors.Is(err, store.ErrPlanHasLicenses) {
+			response.Err(c, http.StatusConflict, "HAS_LICENSES",
+				"cannot change the license type of a plan that has licenses; move them to another plan first")
+			return
+		}
+		if feedGateRefused(c, err) {
+			return
+		}
 		if isStripePriceConflict(err) {
 			response.Err(c, http.StatusConflict, "STRIPE_PRICE_IN_USE", "stripe_price_id is already used by another plan")
+			return
+		}
+		if feedGateConflict(c, err) {
 			return
 		}
 		response.Internal(c)
@@ -593,11 +1241,66 @@ func (h *AdminHandler) UpdatePlan(c *gin.Context) {
 }
 
 // isStripePriceConflict recognises the partial unique index on
+// feedGateConflict maps a violation of the feed-gating invariant,
+// raised by the database when concurrent requests slipped past the
+// handler checks, to the same 409 the checks answer.
+func feedGateConflict(c *gin.Context, err error) bool {
+	switch {
+	case err == nil:
+		return false
+	case strings.Contains(err.Error(), "products_feed_gate_in_use"):
+		response.Conflict(c, "BOUNDED_PLANS_EXIST",
+			"update feeds must keep requiring the license key while a plan of this product sells an update period or renewals, or a license still has an update cutoff", nil)
+	case strings.Contains(err.Error(), "plans_feed_not_gated"), strings.Contains(err.Error(), "licenses_feed_not_gated"):
+		response.Conflict(c, "FEED_NOT_GATED",
+			"an update period or renewals need the product's update feeds to require the license key (feed_license_required)", nil)
+	default:
+		return false
+	}
+	return true
+}
+
+// isStripePriceConflict recognises a duplicate write of
 // plans.stripe_price_id. The read-before-write check in
 // stripePriceTaken gives the friendly message; the index is what
 // makes the invariant hold under concurrent writes.
 func isStripePriceConflict(err error) bool {
-	return err != nil && strings.Contains(err.Error(), "idx_plans_stripe_price_unique")
+	return err != nil && (strings.Contains(err.Error(), "idx_plans_stripe_price_unique") ||
+		strings.Contains(err.Error(), "plans_renewal_price_disjoint"))
+}
+
+// stripePricesTaken rejects a purchase price or renewal price that
+// overlaps another mapping. Purchase prices are unique across plans
+// (stripePriceTaken); on top of that, renewal prices and purchase
+// prices must be disjoint: a replica that predates renewals resolves
+// a session by its line-item price alone and would mint a license for
+// the plan owning that price instead of extending the intended one.
+func (h *AdminHandler) stripePricesTaken(c *gin.Context, purchasePrice, renewalPrice, exceptPlanID string) bool {
+	if h.stripePriceTaken(c, purchasePrice, exceptPlanID) {
+		return true
+	}
+	if purchasePrice != "" {
+		if other, err := h.Store.FindPlanByStripeRenewalPrice(c, purchasePrice); err == nil && other.ID != exceptPlanID {
+			response.Conflict(c, "STRIPE_PRICE_IN_USE",
+				"stripe_price_id is the renewal price of plan \""+other.Name+"\"",
+				gin.H{"plan_id": other.ID, "product_id": other.ProductID})
+			return true
+		}
+	}
+	if renewalPrice != "" {
+		if renewalPrice == purchasePrice {
+			response.Conflict(c, "STRIPE_PRICE_IN_USE",
+				"stripe_renewal_price_id must differ from stripe_price_id", nil)
+			return true
+		}
+		if other, err := h.Store.FindPlanByStripePrice(c, renewalPrice); err == nil && other.ID != exceptPlanID {
+			response.Conflict(c, "STRIPE_PRICE_IN_USE",
+				"stripe_renewal_price_id is the purchase price of plan \""+other.Name+"\"",
+				gin.H{"plan_id": other.ID, "product_id": other.ProductID})
+			return true
+		}
+	}
+	return false
 }
 
 // stripePriceTaken rejects a Stripe price already mapped to another
@@ -1073,9 +1776,46 @@ func (h *AdminHandler) CreateLicense(c *gin.Context) {
 		until := time.Now().Add(time.Duration(plan.TrialDays) * 24 * time.Hour)
 		l.ValidUntil = &until
 	}
+	// A bounded update period is only enforceable once every replica
+	// runs a version that knows about it, so it is issued under the
+	// same switch as plan configuration, manual cutoffs and checkout.
+	// The database trigger still fills the period for writes this
+	// build cannot gate (a replica on the previous version), where a
+	// missing cutoff would mean updates for life forever.
+	if updates := plan.InitialUpdatesUntil(time.Now()); updates != nil {
+		if h.maintenanceGated(c) {
+			return
+		}
+		// The same wait a bounded plan or a manual cutoff serves: a
+		// period issued now would be skippable through a copy of the
+		// public feed until the links in it expire.
+		prod, err := h.Store.FindProductByID(c, l.ProductID)
+		if err != nil {
+			response.Internal(c)
+			return
+		}
+		if h.feedNotGated(c, prod) {
+			return
+		}
+		l.UpdatesUntil = updates
+	}
+	l.UpdatesTermsSet = true
 
 	// Create license and subscription in a single transaction to prevent orphan records
 	if err := h.Store.CreateLicenseWithSubscription(c, l, plan); err != nil {
+		// The product's feeds went public between the check above and
+		// this write.
+		if errors.Is(err, store.ErrUpdatePeriodNotEnforceable) {
+			response.Conflict(c, "FEED_NOT_GATED",
+				"the product's update feeds no longer require the license key, so a license with an update period cannot be issued for it",
+				gin.H{"product_id": l.ProductID})
+			return
+		}
+		if errors.Is(err, store.ErrPlanChanged) {
+			response.Conflict(c, "PLAN_CHANGED",
+				"the plan's license type changed while this license was being created; reload and try again", nil)
+			return
+		}
 		response.Internal(c)
 		return
 	}
@@ -1370,6 +2110,142 @@ func (h *AdminHandler) SetLicenseValidUntil(c *gin.Context) {
 		}
 		h.Webhook.Dispatch(c, lic.ProductID, "license.expiry_changed", payload)
 	}
+	response.OK(c, lic)
+}
+
+// SetLicenseUpdatesUntil moves or clears the end of a license's
+// maintenance period. Unlike valid_until this is not owned by Stripe:
+// a paid renewal extends from whatever end is set here. Past dates
+// are accepted — "no more updates as of last month" is a legitimate
+// correction and has no side effect on the license itself.
+//
+// POST /admin/licenses/:id/updates-until  { updates_until: RFC 3339 | "" }
+func (h *AdminHandler) SetLicenseUpdatesUntil(c *gin.Context) {
+	id := c.Param("id")
+	if !h.checkLicenseScope(c, id) {
+		return
+	}
+	var req struct {
+		UpdatesUntil string `json:"updates_until"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.BadRequest(c, "invalid request body")
+		return
+	}
+	lic, err := h.Store.FindLicenseByID(c, id)
+	if err != nil {
+		response.NotFound(c, "license not found")
+		return
+	}
+	// Only perpetual licenses have a period separate from valid_until.
+	plan, err := h.Store.FindPlanByID(c, lic.PlanID)
+	if err != nil {
+		response.Internal(c)
+		return
+	}
+	if plan.LicenseType != "perpetual" {
+		response.Err(c, http.StatusBadRequest, "NOT_PERPETUAL",
+			"only perpetual licenses have an update period; others follow valid_until")
+		return
+	}
+	var updatesUntil *time.Time
+	if req.UpdatesUntil != "" {
+		ts, err := time.Parse(time.RFC3339, req.UpdatesUntil)
+		if err != nil {
+			response.BadRequest(c, "updates_until must be an RFC 3339 timestamp or empty")
+			return
+		}
+		updatesUntil = &ts
+	}
+	// A finite cutoff is a maintenance feature like any other: a
+	// replica on the previous version would ignore it, and a public
+	// feed would serve past it.
+	if updatesUntil != nil {
+		if h.maintenanceGated(c) {
+			return
+		}
+		prod, err := h.Store.FindProductByID(c, lic.ProductID)
+		if err != nil {
+			response.Internal(c)
+			return
+		}
+		if h.feedNotGated(c, prod) {
+			return
+		}
+	}
+	// Granting updates for life ends the current period for good;
+	// renewals bought for it are closed so a later refund cannot
+	// take days off a period set afterwards. A finite edit keeps
+	// the ledger: refunds then still remove what was paid for.
+	// The write applies only if the period is still what was read
+	// above: a renewal committing in between must not be overwritten.
+	// A finite cutoff is written under the product's feed gating lock,
+	// with the gating state re-read there: an ungate and re-gate
+	// committing after the check above would restart the drain, and
+	// the trigger on the write only sees that the gate is on.
+	if h.beforeCutoffWrite != nil {
+		h.beforeCutoffWrite()
+	}
+	applied, moved := false, false
+	err = h.Store.RunInTx(c, func(ctx context.Context, tx bun.Tx) error {
+		// Row first, then the gate: the order the triggers use.
+		locked, err := store.LockLicenseIn(ctx, tx, lic.ID)
+		if err != nil {
+			return err
+		}
+		// The plan read above may have been changed underneath this
+		// edit. A license moved off a perpetual plan has no period of
+		// its own — and a plan change leaves the same NULL the admin
+		// saw, so the compare-and-set below would not notice.
+		lockedPlan, err := store.FindPlanByIDIn(ctx, tx, locked.PlanID)
+		if err != nil {
+			return err
+		}
+		if lockedPlan.LicenseType != "perpetual" || locked.ProductID != lic.ProductID {
+			moved = true
+			return nil
+		}
+		if updatesUntil != nil {
+			if problem, err := h.maintenanceSwitchOff(ctx, tx); err != nil || problem != nil {
+				return firstNonNil(err, problem)
+			}
+			problem, err := h.lockFeedGateIn(ctx, tx, locked.ProductID)
+			if err != nil {
+				return err
+			}
+			if problem != nil {
+				return problem
+			}
+		}
+		applied, err = store.SetLicenseUpdatesUntilIn(ctx, tx, lic.ID, lic.UpdatesUntil, updatesUntil, updatesUntil == nil)
+		return err
+	})
+	if err != nil {
+		if feedGateRefused(c, err) {
+			return
+		}
+		if feedGateConflict(c, err) {
+			return
+		}
+		response.Internal(c)
+		return
+	}
+	if moved {
+		response.Conflict(c, "LICENSE_CHANGED",
+			"the license moved to another plan or product while you were editing it; reload and try again", nil)
+		return
+	}
+	if !applied {
+		response.Conflict(c, "LICENSE_CHANGED",
+			"the license's update period changed while you were editing it; reload and try again", nil)
+		return
+	}
+	lic.UpdatesUntil = updatesUntil
+	h.Store.Audit(c, &model.AuditLog{
+		Entity: "license", EntityID: id, Action: "updates_until_changed",
+		ActorType: "admin", ActorID: adminID(c),
+		Changes: map[string]any{"updates_until": req.UpdatesUntil},
+	})
 	response.OK(c, lic)
 }
 
@@ -1916,9 +2792,114 @@ func (h *AdminHandler) ChangeLicensePlan(c *gin.Context) {
 	}
 
 	oldPlanID := l.PlanID
-	l.PlanID = req.PlanID
-	if err := h.Store.UpdateLicense(c, l, "plan_id"); err != nil {
+	oldPlan, err := h.Store.FindPlanByID(c, oldPlanID)
+	if err != nil {
 		response.Internal(c)
+		return
+	}
+	l.PlanID = req.PlanID
+	// An early refusal with the usual message: the switch is read
+	// again inside the transaction, where the plan that decides
+	// whether a period is granted at all is the locked one.
+	if plan.LicenseType == "perpetual" && oldPlan.LicenseType != "perpetual" &&
+		plan.InitialUpdatesUntil(time.Now()) != nil && h.maintenanceGated(c) {
+		return
+	}
+	// What happens to the update period follows the license types,
+	// and both plans are read again under lock inside the write: a
+	// plan retyped between this handler's read and its write would
+	// otherwise decide the license's shape by a stale reading — most
+	// of all when the target has just become perpetual, where the
+	// stale branch would clear a paid period and close its renewal
+	// ledger.
+	moved := false
+	if h.beforeCutoffWrite != nil {
+		h.beforeCutoffWrite()
+	}
+	err = h.Store.RunInTx(c, func(ctx context.Context, tx bun.Tx) error {
+		// Rows first, then the gate: the license being written, and
+		// the plan it moves to, whose key this write references.
+		locked, err := store.LockLicenseIn(ctx, tx, l.ID)
+		if err != nil {
+			return err
+		}
+		if err := store.LockReferencedRowsIn(ctx, tx, req.PlanID, ""); err != nil {
+			return err
+		}
+		if locked.PlanID != oldPlanID {
+			moved = true
+			return nil
+		}
+		newPlan, err := store.FindPlanByIDIn(ctx, tx, req.PlanID)
+		if err != nil {
+			return err
+		}
+		fromPlan, err := store.FindPlanByIDIn(ctx, tx, locked.PlanID)
+		if err != nil {
+			return err
+		}
+		if newPlan.ProductID != locked.ProductID {
+			moved = true
+			return nil
+		}
+
+		// The maintenance period follows the license type. Leaving
+		// perpetual clears it (subscriptions follow valid_until);
+		// entering perpetual starts the new plan's period; moving
+		// between perpetual plans keeps what the customer already
+		// has, and is not written at all — a renewal may have
+		// committed since this handler read the license, and writing
+		// the old value back would take that paid time away. A change
+		// of license type starts a new period, and the renewal ledger
+		// of the old one is closed with it.
+		update := store.UpdateLicenseIn
+		cols := []string{"plan_id"}
+		grantsPeriod := false
+		switch {
+		case newPlan.LicenseType != "perpetual":
+			l.UpdatesUntil = nil
+			cols = append(cols, "updates_until")
+			update = store.UpdateLicenseAndSupersedeRenewalsIn
+		case fromPlan.LicenseType != "perpetual":
+			updates := newPlan.InitialUpdatesUntil(time.Now())
+			l.UpdatesUntil = updates
+			grantsPeriod = updates != nil
+			cols = append(cols, "updates_until")
+			update = store.UpdateLicenseAndSupersedeRenewalsIn
+		default:
+			l.UpdatesUntil = locked.UpdatesUntil
+		}
+		if grantsPeriod {
+			// Granting a period here is an issuance like any other:
+			// every replica must understand it, the product's feeds
+			// must require the key, and what the public feed handed
+			// out before the gate went up must have expired.
+			if problem, err := h.maintenanceSwitchOff(ctx, tx); err != nil || problem != nil {
+				return firstNonNil(err, problem)
+			}
+			problem, err := h.lockFeedGateIn(ctx, tx, locked.ProductID)
+			if err != nil {
+				return err
+			}
+			if problem != nil {
+				return problem
+			}
+		}
+		return update(ctx, tx, l, cols...)
+	})
+	if err != nil {
+		if feedGateRefused(c, err) {
+			return
+		}
+		if feedGateConflict(c, err) {
+			return
+		}
+		response.Internal(c)
+		return
+	}
+	if moved {
+		response.Conflict(c, "LICENSE_CHANGED",
+			"the license moved to another plan while you were editing it; reload and try again", nil)
 		return
 	}
 
@@ -1939,11 +2920,7 @@ func (h *AdminHandler) ChangeLicensePlan(c *gin.Context) {
 		if prod, perr := h.Store.FindProductByID(c, l.ProductID); perr == nil {
 			productName = prod.Name
 		}
-		oldPlanName := ""
-		if oldPlan, perr := h.Store.FindPlanByID(c, oldPlanID); perr == nil {
-			oldPlanName = oldPlan.Name
-		}
-		h.Email.SendPlanChanged(l.Email, productName, oldPlanName, plan.Name)
+		h.Email.SendPlanChanged(l.Email, productName, oldPlan.Name, plan.Name)
 	}
 
 	response.OK(c, gin.H{"status": "plan_changed", "plan_id": req.PlanID})
@@ -1960,8 +2937,11 @@ var settingsWritable = map[string]bool{
 	"webhook_max_attempts": true, "webhook_timeout": true,
 	"quota_warning_threshold":          true,
 	"setup_complete":                   true,
+	"maintenance_features_enabled":     true,
+	"feed_url_ttl_bound":               true,
 	"email_template_license_created":   true,
 	"email_template_license_expiring":  true,
+	"email_template_updates_ending":    true,
 	"email_template_license_expired":   true,
 	"email_template_trial_expired":     true,
 	"email_template_license_suspended": true,
@@ -2076,6 +3056,20 @@ func (h *AdminHandler) UpdateSettings(c *gin.Context) {
 	if len(writes) == 0 {
 		response.OK(c, gin.H{"status": "saved"})
 		return
+	}
+	// The wait a gated feed imposes is measured against this, so a
+	// value that does not parse — or one that is zero, negative or
+	// absurd — would end the wait early or never. Lowering it is
+	// allowed: it is how an operator says the longer-lived links are
+	// gone, after every replica has moved to the shorter TTL.
+	if v, ok := writes[store.SettingFeedURLTTLBound]; ok {
+		d, perr := store.ParseDurationSetting(store.SettingFeedURLTTLBound, v)
+		if perr != nil {
+			response.BadRequest(c, store.SettingFeedURLTTLBound+" must be a positive duration of at most "+
+				store.MaxDurationSetting.String()+", such as 24h0m0s: the wait before an update period may be sold is measured against it")
+			return
+		}
+		writes[store.SettingFeedURLTTLBound] = d.String()
 	}
 
 	if err := h.Store.SetSettings(c, writes); err != nil {
@@ -2438,7 +3432,12 @@ func (h *AdminHandler) ExportLicenses(c *gin.Context) {
 			LicenseKey string `json:"license_key"`
 			ValidFrom  string `json:"valid_from"`
 			ValidUntil string `json:"valid_until"`
-			CreatedAt  string `json:"created_at"`
+			// UpdatesUntil is the end of a perpetual license's
+			// maintenance period; empty means no separate limit. The
+			// export exists to migrate off Keygate, so an entitlement
+			// the license actually has must travel with it.
+			UpdatesUntil string `json:"updates_until"`
+			CreatedAt    string `json:"created_at"`
 		}
 
 		out := make([]exportLicense, 0, len(licenses))
@@ -2455,16 +3454,21 @@ func (h *AdminHandler) ExportLicenses(c *gin.Context) {
 			if l.ValidUntil != nil {
 				validUntil = l.ValidUntil.Format(time.RFC3339)
 			}
+			updatesUntil := ""
+			if u := l.EffectiveUpdatesUntil(); u != nil {
+				updatesUntil = u.Format(time.RFC3339)
+			}
 			out = append(out, exportLicense{
-				ID:         l.ID,
-				Email:      l.Email,
-				Product:    productName,
-				Plan:       planName,
-				Status:     l.Status,
-				LicenseKey: h.Store.DecryptLicenseKey(l),
-				ValidFrom:  l.ValidFrom.Format(time.RFC3339),
-				ValidUntil: validUntil,
-				CreatedAt:  l.CreatedAt.Format(time.RFC3339),
+				ID:           l.ID,
+				Email:        l.Email,
+				Product:      productName,
+				Plan:         planName,
+				Status:       l.Status,
+				LicenseKey:   h.Store.DecryptLicenseKey(l),
+				ValidFrom:    l.ValidFrom.Format(time.RFC3339),
+				ValidUntil:   validUntil,
+				UpdatesUntil: updatesUntil,
+				CreatedAt:    l.CreatedAt.Format(time.RFC3339),
 			})
 		}
 
@@ -2484,7 +3488,7 @@ func (h *AdminHandler) ExportLicenses(c *gin.Context) {
 	w := csv.NewWriter(c.Writer)
 	defer w.Flush()
 
-	_ = w.Write([]string{"id", "email", "product", "plan", "status", "license_key", "valid_from", "valid_until", "created_at"})
+	_ = w.Write([]string{"id", "email", "product", "plan", "status", "license_key", "valid_from", "valid_until", "updates_until", "created_at"})
 
 	for _, l := range licenses {
 		productName := ""
@@ -2499,6 +3503,10 @@ func (h *AdminHandler) ExportLicenses(c *gin.Context) {
 		if l.ValidUntil != nil {
 			validUntil = l.ValidUntil.Format(time.RFC3339)
 		}
+		updatesUntil := ""
+		if u := l.EffectiveUpdatesUntil(); u != nil {
+			updatesUntil = u.Format(time.RFC3339)
+		}
 		_ = w.Write(csvSafeRow([]string{
 			l.ID,
 			l.Email,
@@ -2508,6 +3516,7 @@ func (h *AdminHandler) ExportLicenses(c *gin.Context) {
 			h.Store.DecryptLicenseKey(l),
 			l.ValidFrom.Format(time.RFC3339),
 			validUntil,
+			updatesUntil,
 			l.CreatedAt.Format(time.RFC3339),
 		}))
 	}

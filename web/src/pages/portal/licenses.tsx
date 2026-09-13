@@ -33,6 +33,11 @@ export default function PortalLicensesPage() {
   })
 
   const licenses = data?.licenses || []
+  // Renewals can be switched off server-side (during a rollout, or
+  // when the merchant stops selling them); don't offer what the
+  // endpoint would refuse. Only an explicit true counts: a replica on
+  // a version without the field has no renewal endpoint either.
+  const renewalsEnabled = data?.renewals_enabled === true
 
   if (isLoading) {
     return (
@@ -62,7 +67,7 @@ export default function PortalLicensesPage() {
       ) : (
         <div className="space-y-6">
           {licenses.map((lic) => (
-            <LicenseCard key={lic.id} license={lic} />
+            <LicenseCard key={lic.id} license={lic} renewalsEnabled={renewalsEnabled} />
           ))}
         </div>
       )}
@@ -70,8 +75,13 @@ export default function PortalLicensesPage() {
   )
 }
 
-function LicenseCard({ license: lic }: { license: PortalLicense }) {
+function LicenseCard({ license: lic, renewalsEnabled }: { license: PortalLicense; renewalsEnabled: boolean }) {
   const { t } = useI18n()
+  const { user } = useAuth()
+  // Seat members see the license too, but renewals, plan changes,
+  // cancellation and payment methods belong to the license holder;
+  // the server authorises those by the license's own address.
+  const isOwner = !!user?.email && user.email.toLowerCase() === lic.email.toLowerCase()
   const [copied, setCopied] = useState(false)
   const [showInvoices, setShowInvoices] = useState(false)
   const [showChangePlan, setShowChangePlan] = useState(false)
@@ -95,6 +105,34 @@ function LicenseCard({ license: lic }: { license: PortalLicense }) {
   // subscription. A one-time purchase has none: the backend answers 400
   // to each, so don't offer them.
   const hasSubscription = lic.payment_provider === "stripe" && !!lic.stripe_subscription_id
+
+  // Maintenance period of a perpetual license. The license never
+  // expires; updates_until only bounds which releases may be installed.
+  const isPerpetualPlan = lic.plan?.license_type === "perpetual"
+  const updatesUntil = lic.updates_until ? new Date(lic.updates_until) : null
+  const updatesEnded = updatesUntil !== null && updatesUntil.getTime() < Date.now()
+  const updatesEndingSoon =
+    updatesUntil !== null && !updatesEnded && updatesUntil.getTime() - Date.now() < 30 * 24 * 60 * 60 * 1000
+  const canRenewUpdates =
+    renewalsEnabled &&
+    isOwner &&
+    isPerpetualPlan &&
+    updatesUntil !== null &&
+    lic.status === "active" &&
+    lic.plan?.active !== false &&
+    (lic.plan?.renewal_days ?? 0) > 0 &&
+    !!lic.plan?.stripe_renewal_price_id
+  const [renewing, setRenewing] = useState(false)
+  const handleRenewUpdates = async () => {
+    setRenewing(true)
+    try {
+      const res = await portal.renewUpdates({ license_id: lic.id })
+      window.location.href = res.url
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : "An error occurred")
+      setRenewing(false)
+    }
+  }
 
   const handleBillingPortal = async () => {
     try {
@@ -152,8 +190,31 @@ function LicenseCard({ license: lic }: { license: PortalLicense }) {
           )}
         </div>
 
-        {/* Billing actions */}
-        {lic.payment_provider === "stripe" && (
+        {/* Maintenance period */}
+        {isPerpetualPlan && (
+          <div className="flex items-center justify-between gap-3 flex-wrap text-sm">
+            <p className={cn(updatesEnded ? "text-muted-foreground" : "", updatesEndingSoon ? "text-amber-600" : "")}>
+              {updatesUntil === null
+                ? t("portal.updatesForLife")
+                : updatesEnded
+                  ? t("portal.updatesEnded", { date: formatDate(lic.updates_until) })
+                  : `${t("portal.updatesUntil")} ${formatDate(lic.updates_until)}${updatesEndingSoon ? ` · ${t("portal.updatesEndingSoon")}` : ""}`}
+            </p>
+            {canRenewUpdates && (
+              <Button
+                size="sm"
+                variant={updatesEnded || updatesEndingSoon ? "default" : "outline"}
+                onClick={handleRenewUpdates}
+                disabled={renewing}
+              >
+                {renewing ? t("common.loading") : t("portal.renewUpdates")}
+              </Button>
+            )}
+          </div>
+        )}
+
+        {/* Billing actions (license holder only) */}
+        {isOwner && lic.payment_provider === "stripe" && (
           <div className="flex gap-2 flex-wrap">
             <Button variant="outline" size="sm" onClick={() => setShowInvoices(true)}>
               {t("portal.viewInvoices")}

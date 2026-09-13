@@ -73,6 +73,7 @@ func DefaultTemplates() map[string]string {
 	return map[string]string{
 		"license_created":   tmplLicenseCreated,
 		"license_expiring":  tmplLicenseExpiring,
+		"updates_ending":    tmplUpdatesEnding,
 		"license_expired":   tmplLicenseExpired,
 		"trial_expired":     tmplTrialExpired,
 		"license_suspended": tmplLicenseSuspended,
@@ -147,6 +148,11 @@ func (s *EmailService) Send(to, subject, htmlBody string) error {
 // step returns the "unencrypted connection" error from PlainAuth's
 // own guard. That's the safe default; relay-style deployments that
 // genuinely want plaintext auth can run their own postfix in front.
+// smtpSessionTimeout bounds one SMTP session end to end (after the
+// dial). Two attempts fit inside the reminder claim lease, and inside
+// the queue claim lease (store.emailClaimLease), with margin.
+const smtpSessionTimeout = 2 * time.Minute
+
 func (s *EmailService) sendOnce(addr, to string, msg []byte) error {
 	// The SMTP envelope sender (MAIL FROM, RFC 5321) must be a BARE
 	// address — "noreply@x.com", never "Keygate <noreply@x.com>".
@@ -171,6 +177,11 @@ func (s *EmailService) sendOnce(addr, to string, msg []byte) error {
 	if err != nil {
 		return fmt.Errorf("dial: %w", err)
 	}
+	// A server that accepts the connection and then stalls must not
+	// hold the sender indefinitely: reminder claims are leases, and a
+	// send that outlives its lease would be repeated by another
+	// replica. One attempt plus the retry stays well inside the lease.
+	_ = conn.SetDeadline(time.Now().Add(smtpSessionTimeout))
 	c, err := smtp.NewClient(conn, s.host)
 	if err != nil {
 		_ = conn.Close()
@@ -362,6 +373,24 @@ func (s *EmailService) SendLicenseExpiring(to, productName, licenseKey, expiresA
 			s.logger.Error("email delivery failed", "to", to, "subject", productName+" license expiring soon", "error", err)
 		}
 	}()
+}
+
+// RenderUpdatesEnding builds the 14-day notice that a perpetual
+// license's maintenance period ends; the license itself keeps working
+// past that date. The caller queues it rather than sending it: the
+// reminder job runs inside the hourly expiry loop, serially over
+// every due license, and an SMTP server that accepts connections and
+// then stalls would hold the whole loop — payment reminders, renewal
+// reminders, cleanup — behind it. The queue is durable and retries
+// with backoff, so queuing is also what makes the reminder survive a
+// crash.
+func (s *EmailService) RenderUpdatesEnding(productName, licenseKey, updatesUntil string) (subject, body string) {
+	body = renderTemplate(s.getTemplate("updates_ending", tmplUpdatesEnding), map[string]string{
+		"Product":      productName,
+		"LicenseKey":   licenseKey,
+		"UpdatesUntil": updatesUntil,
+	})
+	return productName + " updates ending soon", body
 }
 
 func (s *EmailService) SendQuotaWarning(to, productName, feature string, used, limit int64, pct int) {
@@ -649,16 +678,25 @@ func (s *EmailService) StartEmailQueueProcessor(ctx context.Context, db *store.S
 	}
 }
 
+// emailQueueBatch bounds one pass of the queue, so a backlog is worked
+// through over several ticks instead of in one long run.
+const emailQueueBatch = 20
+
 func (s *EmailService) processQueue(ctx context.Context, db *store.Store) {
-	emails, err := db.ListPendingEmails(ctx, 20)
-	if err != nil {
-		return
-	}
-	for _, e := range emails {
+	for i := 0; i < emailQueueBatch; i++ {
+		if ctx.Err() != nil {
+			return
+		}
+		// Claimed one at a time, immediately before sending it: the
+		// lease has to outlive this send alone, not the whole batch.
+		e, err := db.ClaimNextEmail(ctx)
+		if err != nil || e == nil {
+			return
+		}
 		if err := s.Send(e.ToAddr, e.Subject, e.Body); err != nil {
-			db.MarkEmailFailed(ctx, e.ID, err.Error())
+			db.MarkEmailFailed(ctx, e.ID, e.ClaimToken, err.Error())
 		} else {
-			db.MarkEmailSent(ctx, e.ID)
+			db.MarkEmailSent(ctx, e.ID, e.ClaimToken)
 		}
 	}
 }
@@ -691,6 +729,14 @@ const tmplLicenseExpiring = `<!DOCTYPE html>
 <p>Your <strong>{{.Product}}</strong> license expires on <strong>{{.ExpiresAt}}</strong>.</p>
 <p>License key: <code>{{.LicenseKey}}</code></p>
 <p>Please renew to avoid service interruption.</p>
+</body></html>`
+
+const tmplUpdatesEnding = `<!DOCTYPE html>
+<html><body style="font-family: -apple-system, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
+<h2 style="color: #111;">Updates Ending Soon</h2>
+<p>Your <strong>{{.Product}}</strong> license includes updates until <strong>{{.UpdatesUntil}}</strong>.</p>
+<p>License key: <code>{{.LicenseKey}}</code></p>
+<p>The software keeps working after that date; versions released later need a renewed update period. You can renew from your account portal.</p>
 </body></html>`
 
 const tmplQuotaWarning = `<!DOCTYPE html>

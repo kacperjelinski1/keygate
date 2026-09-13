@@ -73,6 +73,7 @@ const FORM_KEYS = [
   "webhook_max_attempts",
   "webhook_timeout",
   "quota_warning_threshold",
+  "maintenance_features_enabled",
 ] as const
 
 type FormKey = (typeof FORM_KEYS)[number]
@@ -94,9 +95,18 @@ export default function SettingsPage() {
     }
   }, [data])
 
+  // Only the fields this page actually changed are sent. Posting the
+  // whole form would let a page opened hours ago write its stale
+  // values back — most of all the maintenance switch, where saving an
+  // unrelated field would silently re-confirm a rollout that an
+  // incompatible build has since switched off.
+  const changedSettings = () =>
+    Object.fromEntries(
+      FORM_KEYS.filter((k) => k in form && form[k] !== (data?.settings?.[k] ?? "")).map((k) => [k, form[k]]),
+    )
+
   const saveMut = useMutation({
-    mutationFn: () =>
-      admin.updateSettings(Object.fromEntries(FORM_KEYS.filter((k) => k in form).map((k) => [k, form[k]]))),
+    mutationFn: () => admin.updateSettings(changedSettings()),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["admin", "settings"] })
       setSaved(true)
@@ -320,6 +330,24 @@ export default function SettingsPage() {
                 </SelectContent>
               </Select>
               <p className="text-xs text-muted-foreground">{t("settings.signupModeDesc")}</p>
+            </CardContent>
+          </Card>
+          <Card>
+            <CardHeader>
+              <CardTitle>{t("settings.maintenance")}</CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-2">
+              <div className="flex items-center gap-3">
+                <input
+                  type="checkbox"
+                  id="maintenance-features"
+                  checked={form.maintenance_features_enabled === "true"}
+                  onChange={(e) => set("maintenance_features_enabled", e.target.checked ? "true" : "false")}
+                  className="h-4 w-4 rounded border-input accent-primary"
+                />
+                <Label htmlFor="maintenance-features">{t("settings.maintenanceEnabled")}</Label>
+              </div>
+              <p className="text-xs text-muted-foreground">{t("settings.maintenanceDesc")}</p>
             </CardContent>
           </Card>
           <Card>

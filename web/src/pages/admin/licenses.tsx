@@ -480,6 +480,14 @@ function LicenseDetail({ id, onClose }: { id: string; onClose: () => void }) {
       setEditingValidUntil(null)
     },
   })
+  const [editingUpdatesUntil, setEditingUpdatesUntil] = useState<string | null>(null)
+  const updatesUntilMut = useMutation({
+    mutationFn: (updatesUntil: string) => admin.setLicenseUpdatesUntil(id, updatesUntil),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["admin"] })
+      setEditingUpdatesUntil(null)
+    },
+  })
   // Activation deletion is destructive — wrap in a confirmation
   // state so a stray ghost-click on the trash icon (icons sit
   // close together in the row) doesn't immediately revoke a device.
@@ -626,6 +634,59 @@ function LicenseDetail({ id, onClose }: { id: string; onClose: () => void }) {
                       </div>
                     )}
                   </div>
+                  {/* Maintenance period, perpetual plans only. Not owned by
+                      Stripe: a paid renewal extends from whatever is set here. */}
+                  {lic.plan?.license_type === "perpetual" && (
+                    <div>
+                      <p className="text-muted-foreground">{t("licenses.updatesUntil")}</p>
+                      {editingUpdatesUntil === null ? (
+                        <div className="flex items-center gap-1 mt-1">
+                          <p>{lic.updates_until ? formatDate(lic.updates_until) : t("portal.updatesForLife")}</p>
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            className="h-6 w-6"
+                            title={t("licenses.updatesUntilEdit")}
+                            onClick={() =>
+                              setEditingUpdatesUntil(lic.updates_until ? localDateValue(lic.updates_until) : "")
+                            }
+                          >
+                            <Pencil className="h-3 w-3" />
+                          </Button>
+                        </div>
+                      ) : (
+                        <div className="mt-1 space-y-1">
+                          <div className="flex items-center gap-1">
+                            <Input
+                              type="date"
+                              className="h-7 w-40 text-xs"
+                              value={editingUpdatesUntil}
+                              onChange={(e) => setEditingUpdatesUntil(e.target.value)}
+                            />
+                            <Button
+                              size="sm"
+                              className="h-7"
+                              disabled={updatesUntilMut.isPending}
+                              onClick={() =>
+                                updatesUntilMut.mutate(editingUpdatesUntil ? endOfDayISO(editingUpdatesUntil) : "")
+                              }
+                            >
+                              {t("common.save")}
+                            </Button>
+                            <Button
+                              size="sm"
+                              variant="ghost"
+                              className="h-7"
+                              onClick={() => setEditingUpdatesUntil(null)}
+                            >
+                              {t("common.cancel")}
+                            </Button>
+                          </div>
+                          <p className="text-xs text-muted-foreground">{t("licenses.updatesUntilClear")}</p>
+                        </div>
+                      )}
+                    </div>
+                  )}
                   {lic.payment_provider && (
                     <div>
                       <p className="text-muted-foreground">{t("licenses.payment")}</p>

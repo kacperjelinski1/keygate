@@ -76,6 +76,9 @@ const zh = {
   "products.title": "产品管理",
   "products.subtitle": "管理您的软件产品。",
   "products.new": "新建产品",
+  "products.feedLicenseRequired": "更新 feed 需要许可证密钥",
+  "products.feedLicenseRequiredHint":
+    "按维护期销售的产品在更新器能表明身份后开启，开启后不带凭证的 feed 返回 401。能设置请求头的更新器用 X-License-Key，不能的用 /license/verify 签发的令牌（license_token）。密钥放进 URL 会被直接拒绝：它会先留在代理和 CDN 日志里。",
   "products.slug": "标识符",
   "products.empty": "暂无产品",
   "products.deleteConfirm": "此操作不可撤销。已有许可证的产品无法删除。",
@@ -340,6 +343,10 @@ const zh = {
   "settings.testEmail": "发送测试邮件",
   "settings.testEmailDesc": "发送测试邮件以验证 SMTP 配置。",
   "settings.signup": "注册",
+  "settings.maintenance": "维护期",
+  "settings.maintenanceEnabled": "启用维护期功能",
+  "settings.maintenanceDesc":
+    "有限更新期、续费、需要密钥的更新 feed 和手动截止日在开启前都会被拒绝。请在所有副本都升级到带此设置的版本后再开启，旧副本会忽略截止日并提供更新的版本。关闭后不再签发新的有限维护期许可证，也不再创建新的续费结账；但已经创建的续费结账若随后付款仍会正常兑现——它延长的是许可证已有的周期。关闭开关不会撤销 Stripe 中已有的结账会话。回滚到没有此设置的版本之前，请先关闭它。开启网关后的等待时间，按这套安装已知用过的最长 STORAGE_FEED_URL_TTL（feed_url_ttl_bound 设置）计算；要缩短它，请先让所有副本都改用较短的 TTL，等按旧上界签发的链接全部过期，最后再调低该设置。",
   "settings.signupMode": "谁可以创建账号",
   "settings.signupOpen": "任何有邮箱的人",
   "settings.signupLicensedOnly": "仅持有许可证的邮箱",
@@ -409,6 +416,8 @@ const zh = {
   "checkout.licenseCreated": "许可证密钥已创建",
   "checkout.error": "无法验证付款。您的许可证将稍后通过邮件发送。",
   "checkout.viewLicense": "查看我的许可证",
+  "checkout.renewalSuccess": "更新期已延长。",
+  "checkout.backToPortal": "返回我的许可证",
 
   // Portal
   "portal.myLicenses": "我的许可证",
@@ -459,6 +468,11 @@ const zh = {
   "portal.changePlanDesc": "选择新方案。变更立即生效，按比例计费。",
   "portal.noOtherPlans": "暂无其他可选方案。",
   "portal.switchTo": "切换",
+  "portal.updatesUntil": "更新至",
+  "portal.updatesForLife": "含永久更新",
+  "portal.updatesEndingSoon": "即将到期",
+  "portal.updatesEnded": "更新已于 {date} 到期，软件可继续使用。",
+  "portal.renewUpdates": "续费更新",
 
   // Filters
   "filter.allProducts": "所有产品",
@@ -514,6 +528,11 @@ const zh = {
   "plans.string": "字符串",
   "plans.quota": "配额",
   "plans.feature": "功能",
+  "plans.updatesDays": "包含更新（天）",
+  "plans.updatesDaysHint": "0 表示永久更新。仅永久许可证适用，且产品的更新 feed 必须要求许可证密钥。",
+  "plans.renewalDays": "续费时长（天）",
+  "plans.stripeRenewalPriceId": "Stripe 续费价格 ID",
+  "plans.renewalHint": "用户在门户续费更新时支付的一次性价格。",
 
   // Products extras
   "products.desktop": "桌面",
@@ -555,6 +574,9 @@ const zh = {
 
   // Licenses refund
   "licenses.refund": "退款",
+  "licenses.updatesUntil": "更新至",
+  "licenses.updatesUntilEdit": "编辑更新期",
+  "licenses.updatesUntilClear": "留空表示永久更新。",
 
   // Addons
   "nav.addons": "附加组件",

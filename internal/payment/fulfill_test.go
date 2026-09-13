@@ -871,7 +871,7 @@ func openStore(t *testing.T) (*store.Store, context.Context) {
 func seedPlan(t *testing.T, s *store.Store, ctx context.Context, tag, licenseType string) *model.Plan {
 	t.Helper()
 	suffix := tag + "-" + time.Now().Format("150405.000")
-	prod := &model.Product{Name: tag, Slug: "p-" + suffix, Type: "hybrid"}
+	prod := &model.Product{Name: tag, Slug: "p-" + suffix, Type: "hybrid", FeedLicenseRequired: true}
 	if err := s.CreateProduct(ctx, prod); err != nil {
 		t.Fatalf("create product: %v", err)
 	}

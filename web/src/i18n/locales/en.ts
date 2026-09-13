@@ -77,6 +77,9 @@ const en = {
   "products.title": "Products",
   "products.subtitle": "Manage your software products.",
   "products.new": "New Product",
+  "products.feedLicenseRequired": "Require license key on update feeds",
+  "products.feedLicenseRequiredHint":
+    "Turn on for products sold with a maintenance period, once your updater identifies itself. Feeds answer 401 without it. Updaters that can put a header on the request send X-License-Key; the rest send the signed token from /license/verify as license_token. The key itself is refused in the URL — it would land in proxy and CDN logs.",
   "products.slug": "Slug",
   "products.empty": "No products yet",
   "products.deleteConfirm": "This action cannot be undone. Products with existing licenses cannot be deleted.",
@@ -350,6 +353,10 @@ const en = {
   "settings.testEmail": "Send Test Email",
   "settings.testEmailDesc": "Send a test email to verify your SMTP configuration.",
   "settings.signup": "Sign-ups",
+  "settings.maintenance": "Maintenance periods",
+  "settings.maintenanceEnabled": "Enable maintenance-period features",
+  "settings.maintenanceDesc":
+    "Bounded update periods, renewals, gated update feeds and manual cutoffs stay refused until this is on. Turn it on only after every replica runs a version with this setting; older replicas would ignore the cutoff and serve newer releases. Switching it off stops new bounded licences and new renewal checkouts; a renewal checkout already open in Stripe still fulfils if it is paid, since it extends a period the licence already has. Switch it off again before rolling back to a version without this setting. The wait after gating a feed is measured against the longest STORAGE_FEED_URL_TTL this install is known to have used (the feed_url_ttl_bound setting): to shorten it, move every replica to the shorter TTL first, wait out the links signed under the old one, then lower that setting.",
   "settings.signupMode": "Who can create an account",
   "settings.signupOpen": "Anyone with an email address",
   "settings.signupLicensedOnly": "Only emails that hold a license",
@@ -421,6 +428,8 @@ const en = {
   "checkout.licenseCreated": "Your license key has been created",
   "checkout.error": "Unable to verify payment. Your license will be delivered shortly via email.",
   "checkout.viewLicense": "View my license",
+  "checkout.renewalSuccess": "Your update period has been extended.",
+  "checkout.backToPortal": "Back to my licenses",
 
   // Portal
   "portal.myLicenses": "My Licenses",
@@ -472,6 +481,11 @@ const en = {
   "portal.changePlanDesc": "Select a new plan. Changes take effect immediately with prorated billing.",
   "portal.noOtherPlans": "No other plans available.",
   "portal.switchTo": "Switch",
+  "portal.updatesUntil": "Updates until",
+  "portal.updatesForLife": "Includes lifetime updates",
+  "portal.updatesEndingSoon": "ending soon",
+  "portal.updatesEnded": "Updates ended on {date}. The software keeps working.",
+  "portal.renewUpdates": "Renew updates",
 
   // Filters
   "filter.allProducts": "All products",
@@ -527,6 +541,12 @@ const en = {
   "plans.string": "String",
   "plans.quota": "Quota",
   "plans.feature": "Feature",
+  "plans.updatesDays": "Updates Included (days)",
+  "plans.updatesDaysHint":
+    "0 = updates for life. Only for perpetual plans; the product must require the license key on its update feeds.",
+  "plans.renewalDays": "Renewal Length (days)",
+  "plans.stripeRenewalPriceId": "Stripe Renewal Price ID",
+  "plans.renewalHint": "One-time price customers pay in the portal to extend updates.",
 
   // Products extras
   "products.desktop": "Desktop",
@@ -568,6 +588,9 @@ const en = {
 
   // Licenses refund
   "licenses.refund": "Refund",
+  "licenses.updatesUntil": "Updates Until",
+  "licenses.updatesUntilEdit": "Edit update period",
+  "licenses.updatesUntilClear": "Leave empty for lifetime updates.",
 
   // Addons
   "nav.addons": "Addons",

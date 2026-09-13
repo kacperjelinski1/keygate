@@ -3,9 +3,13 @@ package store
 import (
 	"context"
 	"crypto/rand"
+	"database/sql"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"time"
+
+	"github.com/uptrace/bun"
 
 	"github.com/tabloy/keygate/internal/model"
 )
@@ -23,8 +27,14 @@ func (s *Store) ListProducts(ctx context.Context, search string) ([]*model.Produ
 }
 
 func (s *Store) FindProductByID(ctx context.Context, id string) (*model.Product, error) {
+	return FindProductByIDIn(ctx, s.DB, id)
+}
+
+// FindProductByIDIn reads the product on a caller's transaction, for
+// writers that re-read its gating state under a lock.
+func FindProductByIDIn(ctx context.Context, db bun.IDB, id string) (*model.Product, error) {
 	p := new(model.Product)
-	return p, s.DB.NewSelect().Model(p).Where("id = ?", id).Scan(ctx)
+	return p, db.NewSelect().Model(p).Where("id = ?", id).Scan(ctx)
 }
 
 func (s *Store) CreateProduct(ctx context.Context, p *model.Product) error {
@@ -36,7 +46,35 @@ func (s *Store) CreateProduct(ctx context.Context, p *model.Product) error {
 }
 
 func (s *Store) UpdateProduct(ctx context.Context, p *model.Product) error {
-	_, err := s.DB.NewUpdate().Model(p).WherePK().Exec(ctx)
+	return UpdateProductIn(ctx, s.DB, p)
+}
+
+// UpdateProductGatingNowIn writes the named columns and stamps
+// feed_gated_at with the database clock, reading the stored instant
+// back into p. The wait a gated feed imposes runs from the moment the
+// public feed actually stopped — this write — not from a time read on
+// some replica before the transaction began.
+func UpdateProductGatingNowIn(ctx context.Context, db bun.IDB, p *model.Product, cols ...string) error {
+	q := db.NewUpdate().Model(p).WherePK().
+		Set("feed_gated_at = clock_timestamp()").
+		Returning("feed_gated_at")
+	if len(cols) > 0 {
+		q = q.Column(cols...)
+	}
+	_, err := q.Exec(ctx, &p.FeedGatedAt)
+	return err
+}
+
+// UpdateProductIn writes the product on a caller's transaction. With
+// no columns named it writes the whole row; with columns, only those
+// — a caller that has to refuse the rest of a request can still
+// commit the part it must not lose.
+func UpdateProductIn(ctx context.Context, db bun.IDB, p *model.Product, cols ...string) error {
+	q := db.NewUpdate().Model(p).WherePK()
+	if len(cols) > 0 {
+		q = q.Column(cols...)
+	}
+	_, err := q.Exec(ctx)
 	return err
 }
 
@@ -60,14 +98,33 @@ func (s *Store) ListPlans(ctx context.Context, productID, search string) ([]*mod
 	return out, err
 }
 
-func (s *Store) CreatePlan(ctx context.Context, p *model.Plan) error {
+// FillPlanIDs gives a new plan the ids CreatePlan would, for callers
+// that insert it on their own transaction with CreatePlanIn.
+func (s *Store) FillPlanIDs(p *model.Plan) {
 	if p.ID == "" {
 		p.ID = newID()
 	}
 	if p.CheckoutID == "" {
 		p.CheckoutID = shortID()
 	}
-	_, err := s.DB.NewInsert().Model(p).Exec(ctx)
+}
+
+func (s *Store) CreatePlan(ctx context.Context, p *model.Plan) error {
+	s.FillPlanIDs(p)
+	return RunInTx(ctx, s.DB, func(ctx context.Context, tx bun.Tx) error {
+		return CreatePlanIn(ctx, tx, p)
+	})
+}
+
+// CreatePlanIn writes the plan on a caller's transaction. The caller
+// fills the ids (CreatePlan does it), so a plan created under the
+// feed gating lock is inserted by the same transaction that checked
+// the gate.
+func CreatePlanIn(ctx context.Context, db bun.IDB, p *model.Plan) error {
+	// The plan's first terms row is written by a trigger, so every
+	// writer leaves one — including an older replica or an operator
+	// at the psql prompt.
+	_, err := db.NewInsert().Model(p).Exec(ctx)
 	return err
 }
 
@@ -82,9 +139,44 @@ func shortID() string {
 // Exported for use by the setup handler.
 func ShortID() string { return shortID() }
 
-func (s *Store) UpdatePlan(ctx context.Context, p *model.Plan) error {
-	_, err := s.DB.NewUpdate().Model(p).WherePK().Exec(ctx)
+func (s *Store) UpdatePlan(ctx context.Context, p *model.Plan, cols ...string) error {
+	return RunInTx(ctx, s.DB, func(ctx context.Context, tx bun.Tx) error {
+		return UpdatePlanIn(ctx, tx, p, cols...)
+	})
+}
+
+// UpdatePlanIn writes the plan on a caller's transaction. With no
+// columns named it writes the whole row; with columns, only those —
+// so an edit of one field cannot put another request's change back.
+func UpdatePlanIn(ctx context.Context, db bun.IDB, p *model.Plan, cols ...string) error {
+	q := db.NewUpdate().Model(p).WherePK()
+	if len(cols) > 0 {
+		q = q.Column(cols...)
+	}
+	// The terms history follows from the row itself: a trigger
+	// appends to it when this write actually moves updates_days or
+	// license_type, so an edit of an unrelated field cannot record a
+	// stale value and a write that bypasses this function cannot skip
+	// the record.
+	_, err := q.Exec(ctx)
 	return err
+}
+
+// PlanTermsAt returns what the plan was selling at t — the update
+// period and the kind of licence — and whether the history reaches
+// back that far.
+func (s *Store) PlanTermsAt(ctx context.Context, planID string, t time.Time) (days int, licenseType string, known bool, err error) {
+	err = s.DB.NewRaw(
+		"SELECT updates_days, license_type FROM plan_update_terms WHERE plan_id = ? AND effective_from <= ? ORDER BY effective_from DESC, recorded_at DESC LIMIT 1",
+		planID, t,
+	).Scan(ctx, &days, &licenseType)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, "", false, nil
+	}
+	if err != nil {
+		return 0, "", false, err
+	}
+	return days, licenseType, true, nil
 }
 
 func (s *Store) DeletePlan(ctx context.Context, id string) error {
@@ -435,5 +527,36 @@ func (s *Store) ProductLicenseCount(ctx context.Context, productID string) (int,
 }
 
 func (s *Store) PlanLicenseCount(ctx context.Context, planID string) (int, error) {
-	return s.DB.NewSelect().Model((*model.License)(nil)).Where("plan_id = ?", planID).Count(ctx)
+	return PlanLicenseCountIn(ctx, s.DB, planID)
+}
+
+// PlanLicenseCountIn counts on a caller's transaction, for a writer
+// that holds the plan's row lock across the count and the write.
+func PlanLicenseCountIn(ctx context.Context, db bun.IDB, planID string) (int, error) {
+	return db.NewSelect().Model((*model.License)(nil)).Where("plan_id = ?", planID).Count(ctx)
+}
+
+// ErrPlanHasLicenses: the plan's license type was to change, but a
+// license appeared on it — the type decides what a license carries
+// (a subscription row, an update period), so the licenses move first.
+var ErrPlanHasLicenses = errors.New("plan has licenses")
+
+// ProductHasMaintenance reports whether the product has anything the
+// feed gate protects: a plan selling a bounded update period or
+// renewals, or a license with a finite cutoff (which outlives the
+// plan setting that created it).
+func (s *Store) ProductHasMaintenance(ctx context.Context, productID string) (bool, error) {
+	return ProductHasMaintenanceIn(ctx, s.DB, productID)
+}
+
+// ProductHasMaintenanceIn answers on a caller's transaction, for a
+// writer that decides under the product's lock.
+func ProductHasMaintenanceIn(ctx context.Context, db bun.IDB, productID string) (bool, error) {
+	plans, err := db.NewSelect().Model((*model.Plan)(nil)).
+		Where("product_id = ? AND (updates_days > 0 OR stripe_renewal_price_id <> '')", productID).Exists(ctx)
+	if err != nil || plans {
+		return plans, err
+	}
+	return db.NewSelect().Model((*model.License)(nil)).
+		Where("product_id = ? AND updates_until IS NOT NULL", productID).Exists(ctx)
 }

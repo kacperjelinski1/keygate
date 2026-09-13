@@ -20,6 +20,7 @@ import { admin } from "@/lib/api"
 const TEMPLATE_META: Record<string, { label: string; variables: string[] }> = {
   license_created: { label: "License Created", variables: ["Product", "Plan", "LicenseKey"] },
   license_expiring: { label: "License Expiring", variables: ["Product", "LicenseKey", "ExpiresAt"] },
+  updates_ending: { label: "Updates Ending", variables: ["Product", "LicenseKey", "UpdatesUntil"] },
   license_expired: { label: "License Expired", variables: ["Product"] },
   trial_expired: { label: "Trial Expired", variables: ["Product"] },
   license_suspended: { label: "License Suspended", variables: ["Product", "Reason"] },
@@ -33,6 +34,7 @@ const PREVIEW_DATA: Record<string, string> = {
   Plan: "Pro",
   LicenseKey: "KG-XXXX-XXXX-XXXX-XXXX",
   ExpiresAt: "2026-06-15",
+  UpdatesUntil: "2027-06-15",
   Feature: "api_calls",
   Used: "800",
   Limit: "1000",

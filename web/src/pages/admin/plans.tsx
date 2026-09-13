@@ -321,6 +321,9 @@ function PlanDialog({
     token_ttl_days: plan?.token_ttl_days ?? 0,
     active: plan?.active ?? true,
     stripe_price_id: plan?.stripe_price_id || "",
+    updates_days: plan?.updates_days ?? 0,
+    renewal_days: plan?.renewal_days ?? 0,
+    stripe_renewal_price_id: plan?.stripe_renewal_price_id || "",
   })
 
   const set = (key: string, val: string | number | boolean) => setForm((f) => ({ ...f, [key]: val }))
@@ -540,6 +543,43 @@ function PlanDialog({
                 placeholder="price_..."
               />
             </div>
+            {/* Maintenance period: the license never expires, but only
+                releases published before updates_until can be installed.
+                The server clears these on non-perpetual plans. */}
+            {isPerpetual && (
+              <>
+                <div className="space-y-2">
+                  <Label>{t("plans.updatesDays")}</Label>
+                  <Input
+                    type="number"
+                    min={0}
+                    max={3650}
+                    value={form.updates_days}
+                    onChange={(e) => set("updates_days", Number(e.target.value))}
+                  />
+                  <p className="text-xs text-muted-foreground">{t("plans.updatesDaysHint")}</p>
+                </div>
+                <div className="space-y-2">
+                  <Label>{t("plans.renewalDays")}</Label>
+                  <Input
+                    type="number"
+                    min={0}
+                    max={3650}
+                    value={form.renewal_days}
+                    onChange={(e) => set("renewal_days", Number(e.target.value))}
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label>{t("plans.stripeRenewalPriceId")}</Label>
+                  <Input
+                    value={form.stripe_renewal_price_id}
+                    onChange={(e) => set("stripe_renewal_price_id", e.target.value)}
+                    placeholder="price_..."
+                  />
+                  <p className="text-xs text-muted-foreground">{t("plans.renewalHint")}</p>
+                </div>
+              </>
+            )}
           </div>
           <div className="flex justify-end gap-2 pt-2">
             <Button type="button" variant="outline" onClick={onClose}>

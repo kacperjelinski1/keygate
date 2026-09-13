@@ -213,7 +213,7 @@ function ProductDialog({
   open: boolean
   onClose: () => void
   product?: Product
-  onSubmit: (data: { name: string; slug: string; type: string }) => void
+  onSubmit: (data: { name: string; slug: string; type: string; feed_license_required?: boolean }) => void
   loading: boolean
   title: string
 }) {
@@ -221,10 +221,11 @@ function ProductDialog({
   const [name, setName] = useState(product?.name || "")
   const [slug, setSlug] = useState(product?.slug || "")
   const [type, setType] = useState(product?.type || "desktop")
+  const [feedLicenseRequired, setFeedLicenseRequired] = useState(product?.feed_license_required ?? false)
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault()
-    onSubmit({ name, slug, type })
+    onSubmit(product ? { name, slug, type, feed_license_required: feedLicenseRequired } : { name, slug, type })
   }
 
   return (
@@ -285,6 +286,23 @@ function ProductDialog({
               />
             </div>
           </div>
+          {/* Only meaningful for products that ship releases; shown
+              when editing so a new product starts with public feeds. */}
+          {product && type !== "saas" && (
+            <div className="space-y-1">
+              <div className="flex items-center gap-3">
+                <input
+                  type="checkbox"
+                  id="feed-license-required"
+                  checked={feedLicenseRequired}
+                  onChange={(e) => setFeedLicenseRequired(e.target.checked)}
+                  className="h-4 w-4 rounded border-input accent-primary"
+                />
+                <Label htmlFor="feed-license-required">{t("products.feedLicenseRequired")}</Label>
+              </div>
+              <p className="text-xs text-muted-foreground">{t("products.feedLicenseRequiredHint")}</p>
+            </div>
+          )}
           <div className="flex justify-end gap-2 pt-2">
             <Button type="button" variant="outline" onClick={onClose}>
               {t("common.cancel")}
