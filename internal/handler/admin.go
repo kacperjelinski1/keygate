@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"html/template"
 	"log/slog"
 	"net/http"
 	"slices"
@@ -399,6 +400,11 @@ func (h *AdminHandler) CreateProduct(c *gin.Context) {
 		Name string `json:"name" binding:"required"`
 		Slug string `json:"slug" binding:"required"`
 		Type string `json:"type" binding:"required"`
+		// FeedLicenseRequired at creation is the easy moment to gate:
+		// a product that has published nothing handed out no feed, so
+		// the gate takes effect at once and no drain has to be waited
+		// out. Doing it later works too, and then it does.
+		FeedLicenseRequired bool `json:"feed_license_required"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		response.BadRequest(c, "name, slug, and type are required")
@@ -417,7 +423,14 @@ func (h *AdminHandler) CreateProduct(c *gin.Context) {
 		return
 	}
 
-	p := &model.Product{Name: req.Name, Slug: req.Slug, Type: req.Type}
+	// Same fence as switching the gate on later: while the maintenance
+	// features are off, a replica that predates them may still be
+	// serving, and it would answer the feed without a licence.
+	if req.FeedLicenseRequired && h.maintenanceGated(c) {
+		return
+	}
+
+	p := &model.Product{Name: req.Name, Slug: req.Slug, Type: req.Type, FeedLicenseRequired: req.FeedLicenseRequired}
 	if err := h.Store.CreateProduct(c, p); err != nil {
 		response.Err(c, http.StatusConflict, "DUPLICATE", "product slug already exists")
 		return
@@ -426,7 +439,8 @@ func (h *AdminHandler) CreateProduct(c *gin.Context) {
 	h.Store.Audit(c, &model.AuditLog{
 		Entity: "product", EntityID: p.ID, Action: "created",
 		ActorType: "admin", ActorID: adminID(c),
-		Changes: map[string]any{"name": req.Name, "slug": req.Slug, "type": req.Type},
+		Changes: map[string]any{"name": req.Name, "slug": req.Slug, "type": req.Type,
+			"feed_license_required": req.FeedLicenseRequired},
 	})
 
 	response.Created(c, p)
@@ -740,6 +754,18 @@ type maintenanceFields struct {
 	StripeRenewalPriceID string
 }
 
+// validateStripePriceID refuses anything that is not a Stripe price
+// id. A product id or a payment-link id is accepted by nothing
+// downstream: Stripe rejects the checkout, and the customer is the
+// one who meets the failure, on the plan's buy button.
+func validateStripePriceID(field, id string) error {
+	id = strings.TrimSpace(id)
+	if id == "" || strings.HasPrefix(id, "price_") {
+		return nil
+	}
+	return errors.New(field + " must be a Stripe price id (price_...)")
+}
+
 // normalizeMaintenance validates the maintenance fields against the
 // license type. Only perpetual licenses have a separate update
 // period; on every other type the fields are cleared, mirroring the
@@ -893,6 +919,11 @@ func (h *AdminHandler) CreatePlan(c *gin.Context) {
 		return
 	}
 
+	req.StripePriceID = strings.TrimSpace(req.StripePriceID)
+	if err := validateStripePriceID("stripe_price_id", req.StripePriceID); err != nil {
+		response.BadRequest(c, err.Error())
+		return
+	}
 	if h.stripePricesTaken(c, req.StripePriceID, maint.StripeRenewalPriceID, "") {
 		return
 	}
@@ -1113,11 +1144,22 @@ func (h *AdminHandler) UpdatePlan(c *gin.Context) {
 	// unrelated field could silently restore update terms another
 	// request had just changed — or wipe ones it had just set.
 	cols := []string{}
+	// Validated on the way in, as the create path does: an update
+	// that skipped these could put a name or a slug on a plan that
+	// could never have been created with one.
 	if req.Name != nil {
+		if err := apperr.ValidateName("name", *req.Name); err != nil {
+			response.BadRequest(c, err.Message)
+			return
+		}
 		p.Name = *req.Name
 		cols = append(cols, "name")
 	}
 	if req.Slug != nil {
+		if err := apperr.ValidateSlug(*req.Slug); err != nil {
+			response.BadRequest(c, err.Message)
+			return
+		}
 		p.Slug = *req.Slug
 		cols = append(cols, "slug")
 	}
@@ -1158,7 +1200,13 @@ func (h *AdminHandler) UpdatePlan(c *gin.Context) {
 	}
 	purchasePrice := p.StripePriceID
 	if req.StripePriceID != nil {
-		purchasePrice = *req.StripePriceID
+		purchasePrice = strings.TrimSpace(*req.StripePriceID)
+		// Only when this request sets it: a plan that already holds
+		// some legacy value can still have its other fields edited.
+		if err := validateStripePriceID("stripe_price_id", purchasePrice); err != nil {
+			response.BadRequest(c, err.Error())
+			return
+		}
 	}
 	if h.stripePricesTaken(c, purchasePrice, maint.StripeRenewalPriceID, p.ID) {
 		return
@@ -1358,6 +1406,19 @@ func (h *AdminHandler) CreateEntitlement(c *gin.Context) {
 		response.BadRequest(c, "value_type must be bool, int, string, quota, or flag")
 		return
 	}
+	value, period, err := normalizeFeatureValue(req.ValueType, req.Value, req.QuotaPeriod)
+	if err != nil {
+		response.BadRequest(c, err.Error())
+		return
+	}
+	req.Value, req.QuotaPeriod = value, period
+	// binding:"required" only refuses an empty string, and the
+	// feature name is what every lookup keys on: " api_calls" would
+	// match nothing anyone asks for.
+	if req.Feature = strings.TrimSpace(req.Feature); req.Feature == "" {
+		response.BadRequest(c, "feature is required")
+		return
+	}
 	// Meter event names only make sense for quota features — they
 	// describe how to bill incremental usage. Reject early so a
 	// boolean feature doesn't silently carry a useless field.
@@ -1377,6 +1438,60 @@ func (h *AdminHandler) CreateEntitlement(c *gin.Context) {
 		return
 	}
 	response.Created(c, e)
+}
+
+// quotaPeriods are the windows a quota counter resets on
+// (store.CurrentPeriodKey). Empty means monthly.
+var quotaPeriods = map[string]bool{"hourly": true, "daily": true, "monthly": true, "yearly": true}
+
+// featureValueTypes are the shapes a plan entitlement may take; an
+// addon uses the same set without "flag".
+var featureValueTypes = map[string]bool{"bool": true, "int": true, "string": true, "quota": true, "flag": true}
+
+// normalizeFeatureValue checks that a value can be read back as the
+// type it claims, and returns it in the shape the readers expect.
+// Nothing downstream re-checks it, and the failures are silent in the
+// worst direction: a quota whose value is not a number parses as 0
+// (the error is dropped in service/usage.go), and 0 means "no limit"
+// — the customer would get the feature with no cap at all, the
+// opposite of what was sold. A bool that is not exactly "true" reads
+// as false, and a period nobody recognises quietly becomes monthly.
+//
+// The trimmed value is returned rather than only checked, because the
+// readers do not trim either: strconv.ParseInt(" 10 ") fails just as
+// "ten" does, so accepting a value with spaces and storing it as
+// typed would put the same 0 in the same place.
+//
+// The period is returned for the same reason and cleared when the
+// feature is not a quota — as normalizeMaintenance clears a plan's
+// update terms when it is not perpetual. Refusing instead would mean
+// an addon that once was a quota could not be turned into anything
+// else without a second request to clear a field the form no longer
+// shows.
+func normalizeFeatureValue(valueType, value, quotaPeriod string) (string, string, error) {
+	value = strings.TrimSpace(value)
+	quotaPeriod = strings.TrimSpace(quotaPeriod)
+	switch valueType {
+	case "bool", "flag":
+		if value != "true" && value != "false" {
+			return "", "", errors.New("value for a " + valueType + " feature must be \"true\" or \"false\"")
+		}
+	case "int", "quota":
+		n, err := strconv.ParseInt(value, 10, 64)
+		if err != nil {
+			return "", "", errors.New("value for a " + valueType + " feature must be a whole number")
+		}
+		if n < 0 {
+			return "", "", errors.New("value for a " + valueType + " feature cannot be negative")
+		}
+	}
+	if valueType != "quota" {
+		return value, "", nil
+	}
+	if quotaPeriod != "" && !quotaPeriods[quotaPeriod] {
+		return "", "", errors.New("quota_period must be hourly, daily, monthly, or yearly")
+	}
+	return value, quotaPeriod, nil
 }
 
 func (h *AdminHandler) UpdateEntitlement(c *gin.Context) {
@@ -1422,6 +1537,24 @@ func (h *AdminHandler) UpdateEntitlement(c *gin.Context) {
 		}
 		e.StripeMeterEventName = *req.StripeMeterEventName
 	}
+	// Against the merged row, not the fields this request happened to
+	// carry: changing only the value of a quota, or only the type of
+	// an entitlement, has to leave a pair that still reads back.
+	if !featureValueTypes[e.ValueType] {
+		response.BadRequest(c, "value_type must be bool, int, string, quota, or flag")
+		return
+	}
+	if strings.TrimSpace(e.Feature) == "" {
+		response.BadRequest(c, "feature is required")
+		return
+	}
+	e.Feature = strings.TrimSpace(e.Feature)
+	value, period, verr := normalizeFeatureValue(e.ValueType, e.Value, e.QuotaPeriod)
+	if verr != nil {
+		response.BadRequest(c, verr.Error())
+		return
+	}
+	e.Value, e.QuotaPeriod = value, period
 
 	if err := h.Store.UpdateEntitlement(c, e); err != nil {
 		response.Internal(c)
@@ -2622,6 +2755,16 @@ func (h *AdminHandler) CreateAddon(c *gin.Context) {
 		response.BadRequest(c, "value_type must be bool, int, string, or quota")
 		return
 	}
+	value, period, verr := normalizeFeatureValue(req.ValueType, req.Value, req.QuotaPeriod)
+	if verr != nil {
+		response.BadRequest(c, verr.Error())
+		return
+	}
+	req.Value, req.QuotaPeriod = value, period
+	if req.Feature = strings.TrimSpace(req.Feature); req.Feature == "" {
+		response.BadRequest(c, "feature is required")
+		return
+	}
 
 	a := &model.Addon{
 		ProductID: req.ProductID, Name: req.Name, Slug: req.Slug,
@@ -2631,6 +2774,12 @@ func (h *AdminHandler) CreateAddon(c *gin.Context) {
 		Active: true, SortOrder: req.SortOrder,
 	}
 	if err := h.Store.CreateAddon(c, a); err != nil {
+		// The insert fails for two quite different reasons and the
+		// admin has to be able to tell them apart.
+		if strings.Contains(err.Error(), "foreign key") {
+			response.BadRequest(c, "product_id does not exist")
+			return
+		}
 		response.Err(c, 409, "DUPLICATE", "addon slug already exists for this product")
 		return
 	}
@@ -2645,7 +2794,11 @@ func (h *AdminHandler) UpdateAddon(c *gin.Context) {
 	}
 
 	var req struct {
-		Name        *string `json:"name"`
+		Name *string `json:"name"`
+		// The slug is an addon's handle in the admin UI and nothing
+		// reads it beyond the per-product unique index, so a typo is
+		// worth being able to fix — as it already is on a plan.
+		Slug        *string `json:"slug"`
 		Description *string `json:"description"`
 		Feature     *string `json:"feature"`
 		ValueType   *string `json:"value_type"`
@@ -2661,6 +2814,9 @@ func (h *AdminHandler) UpdateAddon(c *gin.Context) {
 	}
 	if req.Name != nil {
 		a.Name = *req.Name
+	}
+	if req.Slug != nil {
+		a.Slug = *req.Slug
 	}
 	if req.Description != nil {
 		a.Description = *req.Description
@@ -2686,7 +2842,43 @@ func (h *AdminHandler) UpdateAddon(c *gin.Context) {
 	if req.SortOrder != nil {
 		a.SortOrder = *req.SortOrder
 	}
+	// The create path checks all of this; an update went straight to
+	// the database, so a name, a type or a value refused at creation
+	// could be put on the same addon a moment later.
+	if req.Name != nil {
+		if err := apperr.ValidateName("name", a.Name); err != nil {
+			response.BadRequest(c, err.Message)
+			return
+		}
+	}
+	if req.Slug != nil {
+		if err := apperr.ValidateSlug(a.Slug); err != nil {
+			response.BadRequest(c, err.Message)
+			return
+		}
+	}
+	switch a.ValueType {
+	case "bool", "int", "string", "quota":
+	default:
+		response.BadRequest(c, "value_type must be bool, int, string, or quota")
+		return
+	}
+	if strings.TrimSpace(a.Feature) == "" {
+		response.BadRequest(c, "feature is required")
+		return
+	}
+	a.Feature = strings.TrimSpace(a.Feature)
+	value, period, verr := normalizeFeatureValue(a.ValueType, a.Value, a.QuotaPeriod)
+	if verr != nil {
+		response.BadRequest(c, verr.Error())
+		return
+	}
+	a.Value, a.QuotaPeriod = value, period
 	if err := h.Store.UpdateAddon(c, a); err != nil {
+		if strings.Contains(err.Error(), "duplicate") || strings.Contains(err.Error(), "unique") {
+			response.Err(c, 409, "DUPLICATE", "addon slug already exists for this product")
+			return
+		}
 		response.Internal(c)
 		return
 	}
@@ -3070,6 +3262,20 @@ func (h *AdminHandler) UpdateSettings(c *gin.Context) {
 			return
 		}
 		writes[store.SettingFeedURLTTLBound] = d.String()
+	}
+
+	// A custom email template that does not parse is not rejected by
+	// anything downstream: the renderer gives up and mails the
+	// template source, so the customer receives "{{.LicenseKey}}"
+	// where their key should be. Empty means "back to the default".
+	for key, value := range writes {
+		if !strings.HasPrefix(key, "email_template_") || value == "" {
+			continue
+		}
+		if _, err := template.New(key).Parse(value); err != nil {
+			response.BadRequest(c, key+" is not a valid template: "+err.Error())
+			return
+		}
 	}
 
 	if err := h.Store.SetSettings(c, writes); err != nil {

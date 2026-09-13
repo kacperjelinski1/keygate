@@ -77,9 +77,10 @@ const en = {
   "products.title": "Products",
   "products.subtitle": "Manage your software products.",
   "products.new": "New Product",
-  "products.feedLicenseRequired": "Require license key on update feeds",
-  "products.feedLicenseRequiredHint":
-    "Turn on for products sold with a maintenance period, once your updater identifies itself. Feeds answer 401 without it. Updaters that can put a header on the request send X-License-Key; the rest send the signed token from /license/verify as license_token. The key itself is refused in the URL — it would land in proxy and CDN logs.",
+  "products.feedLicenseRequired": "Update feeds require a license",
+  "products.feedLicenseRequiredHint": "Required before this product can sell a maintenance period.",
+  "products.feedLicenseRequiredHelp":
+    "With it on, the update feed answers nobody who doesn't hold a license — which is the only thing that stops a customer whose updates ran out from installing the newest version anyway.\n\nShip an updater that sends the license first: installs still running an older one will stop seeing updates.",
   "products.slug": "Slug",
   "products.empty": "No products yet",
   "products.deleteConfirm": "This action cannot be undone. Products with existing licenses cannot be deleted.",
@@ -94,6 +95,7 @@ const en = {
   "plans.licenseType": "License Type",
   "plans.maxActivations": "Max Activations",
   "plans.maxSeats": "Max Seats",
+  "plans.maxSeatsHint": "0 = no limit.",
   "plans.licenseModel": "License Model",
   "plans.modelStandard": "Standard",
   "plans.modelFloating": "Floating (concurrent)",
@@ -543,7 +545,7 @@ const en = {
   "plans.feature": "Feature",
   "plans.updatesDays": "Updates Included (days)",
   "plans.updatesDaysHint":
-    "0 = updates for life. Only for perpetual plans; the product must require the license key on its update feeds.",
+    "0 = updates for life. Perpetual plans only, and only once the product's update feeds require a license — a public feed would serve past the period.",
   "plans.renewalDays": "Renewal Length (days)",
   "plans.stripeRenewalPriceId": "Stripe Renewal Price ID",
   "plans.renewalHint": "One-time price customers pay in the portal to extend updates.",
@@ -602,6 +604,9 @@ const en = {
   "addons.deleteConfirm": "This will permanently remove this addon.",
   "addons.formDesc": "Configure the addon details.",
   "addons.description": "Description",
+  "addons.valueTrue": "Enabled (true)",
+  "addons.valueFalse": "Disabled (false)",
+  "addons.quotaZeroHint": "Whole number. 0 means no limit.",
 
   // Toast messages
   "toast.productCreated": "Product created successfully.",

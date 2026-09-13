@@ -61,6 +61,7 @@ export default function APIKeysPage() {
       setNewKey(data.key)
       showToast(t("toast.apiKeyCreated"), "success")
     },
+    onError: (e: Error) => showToast(e.message, "error"),
   })
   const deleteMut = useMutation({
     mutationFn: (id: string) => admin.deleteAPIKey(id),
@@ -68,6 +69,7 @@ export default function APIKeysPage() {
       qc.invalidateQueries({ queryKey: ["admin", "api-keys"] })
       setDeleting(null)
     },
+    onError: (e: Error) => showToast(e.message, "error"),
   })
   const rotateMut = useMutation({
     mutationFn: (id: string) => admin.rotateAPIKey(id),
@@ -79,6 +81,7 @@ export default function APIKeysPage() {
       setNewKey(data.key)
       showToast(`${t("apiKeys.rotate")} ✓`, "success")
     },
+    onError: (e: Error) => showToast(e.message, "error"),
   })
 
   if (products.length === 0 && !isLoading) {

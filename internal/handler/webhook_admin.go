@@ -124,6 +124,13 @@ func (h *WebhookAdminHandler) UpdateWebhook(c *gin.Context) {
 		w.URL = *req.URL
 	}
 	if req.Events != nil {
+		// Same rule as creation: a webhook subscribed to nothing is a
+		// row that will never fire, and an empty array reads on the
+		// dashboard exactly like a working endpoint.
+		if len(req.Events) == 0 {
+			response.BadRequest(c, "at least one event type is required")
+			return
+		}
 		w.Events = req.Events
 	}
 	if req.Active != nil {

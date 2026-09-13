@@ -97,6 +97,7 @@ export default function LicensesPage() {
       setCreating(false)
       showToast(t("toast.licenseCreated"), "success")
     },
+    onError: (e: Error) => showToast(e.message, "error"),
   })
 
   if (!isLoading && products.length === 0) {
@@ -454,24 +455,28 @@ function LicenseDetail({ id, onClose }: { id: string; onClose: () => void }) {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["admin"] })
     },
+    onError: (e: Error) => showToast(e.message, "error"),
   })
   const suspendMut = useMutation({
     mutationFn: () => admin.suspendLicense(id),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["admin"] })
     },
+    onError: (e: Error) => showToast(e.message, "error"),
   })
   const reinstateMut = useMutation({
     mutationFn: () => admin.reinstateLicense(id),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["admin"] })
     },
+    onError: (e: Error) => showToast(e.message, "error"),
   })
   const refundMut = useMutation({
     mutationFn: () => admin.refundLicense(id),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["admin"] })
     },
+    onError: (e: Error) => showToast(e.message, "error"),
   })
   const validUntilMut = useMutation({
     mutationFn: (validUntil: string) => admin.setLicenseValidUntil(id, validUntil),
@@ -479,6 +484,7 @@ function LicenseDetail({ id, onClose }: { id: string; onClose: () => void }) {
       qc.invalidateQueries({ queryKey: ["admin"] })
       setEditingValidUntil(null)
     },
+    onError: (e: Error) => showToast(e.message, "error"),
   })
   const [editingUpdatesUntil, setEditingUpdatesUntil] = useState<string | null>(null)
   const updatesUntilMut = useMutation({
@@ -487,6 +493,7 @@ function LicenseDetail({ id, onClose }: { id: string; onClose: () => void }) {
       qc.invalidateQueries({ queryKey: ["admin"] })
       setEditingUpdatesUntil(null)
     },
+    onError: (e: Error) => showToast(e.message, "error"),
   })
   // Activation deletion is destructive — wrap in a confirmation
   // state so a stray ghost-click on the trash icon (icons sit
@@ -498,6 +505,7 @@ function LicenseDetail({ id, onClose }: { id: string; onClose: () => void }) {
       qc.invalidateQueries({ queryKey: ["admin", "license", id] })
       setConfirmDeactivation(null)
     },
+    onError: (e: Error) => showToast(e.message, "error"),
   })
 
   // The key is not in the detail payload — it is fetched per click and
@@ -507,6 +515,7 @@ function LicenseDetail({ id, onClose }: { id: string; onClose: () => void }) {
   const revealMut = useMutation({
     mutationFn: () => admin.revealLicenseKey(id),
     onSuccess: (r) => setRevealedKey(r.license_key),
+    onError: (e: Error) => showToast(e.message, "error"),
   })
   const copyKey = () => {
     const write = (key: string) => {
@@ -957,6 +966,7 @@ function UsageTab({ licenseId }: { licenseId: string }) {
       qc.invalidateQueries({ queryKey: ["admin", "license-usage", licenseId] })
       setConfirmResetUsage(null)
     },
+    onError: (e: Error) => showToast(e.message, "error"),
   })
 
   const counters = data?.counters || []
@@ -1167,6 +1177,7 @@ function ChangePlanDialog({
       qc.invalidateQueries({ queryKey: ["admin"] })
       onClose()
     },
+    onError: (e: Error) => showToast(e.message, "error"),
   })
 
   return (

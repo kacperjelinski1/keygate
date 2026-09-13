@@ -1156,6 +1156,21 @@ func stripHTMLTags(s string) string {
 	return result.String()
 }
 
+// frontendAssetExts are the extensions a browser asks for as files,
+// where the SPA shell would be the wrong answer.
+var frontendAssetExts = map[string]bool{
+	".js": true, ".mjs": true, ".css": true, ".map": true, ".json": true,
+	".png": true, ".jpg": true, ".jpeg": true, ".gif": true, ".svg": true, ".webp": true, ".avif": true,
+	".ico": true, ".woff": true, ".woff2": true, ".ttf": true, ".otf": true, ".wasm": true,
+}
+
+// isFrontendAsset reports whether a path was asked for as a file. A
+// route of the app's own ("/licenses/1.0", say) has an extension too,
+// so the list is explicit rather than "anything with a dot".
+func isFrontendAsset(clean string) bool {
+	return strings.HasPrefix(clean, "/assets/") || frontendAssetExts[strings.ToLower(filepath.Ext(clean))]
+}
+
 // serveFrontend serves the React SPA from web/dist if it exists.
 func serveFrontend(r *gin.Engine) {
 	distPath := "web/dist"
@@ -1184,14 +1199,43 @@ func serveFrontend(r *gin.Engine) {
 		if clean := filepath.Clean(path); clean != "/" && clean != "/index.html" {
 			filePath := filepath.Join(distPath, clean)
 			if info, err := os.Stat(filePath); err == nil && !info.IsDir() {
+				if strings.HasPrefix(clean, "/assets/") {
+					// Every name under /assets carries a content hash,
+					// so one URL never changes what it holds.
+					c.Header("Cache-Control", "public, max-age=31536000, immutable")
+				}
 				c.File(filePath)
+				c.Abort()
+				return
+			}
+			// A file that is missing is a 404, not the app shell. A tab
+			// still holding an older index.html asks for the asset that
+			// build referenced; answering with HTML makes the browser
+			// refuse a script it was promised as JavaScript, and the
+			// page comes up blank with nothing in the server log to say
+			// why. A 404 sends the reload it actually needs.
+			if isFrontendAsset(clean) {
+				c.Status(http.StatusNotFound)
 				c.Abort()
 				return
 			}
 		}
 
-		// SPA fallback: serve cached index.html for all other routes.
-		c.Data(http.StatusOK, "text/html; charset=utf-8", indexHTML)
+		// SPA fallback. index.html is re-read here rather than served
+		// from the copy taken at boot: a frontend rebuilt or
+		// redeployed under a running server would otherwise keep
+		// handing out a shell that points at assets it has deleted,
+		// until someone restarts the process. The boot copy stays as
+		// the fallback for a read that fails.
+		html := indexHTML
+		if fresh, err := os.ReadFile(filepath.Join(distPath, "index.html")); err == nil {
+			html = fresh
+		}
+		// The shell names hashed assets, so it must not be held by a
+		// cache across a deploy; what it points at may be cached
+		// forever.
+		c.Header("Cache-Control", "no-cache")
+		c.Data(http.StatusOK, "text/html; charset=utf-8", html)
 		c.Abort()
 	})
 }

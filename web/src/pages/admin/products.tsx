@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { Cloud, Laptop, Layers, Pencil, Plus, Search, Trash2 } from "lucide-react"
 import { useState } from "react"
+import { HelpTip } from "@/components/help-tip"
 import { showToast } from "@/components/toast"
 import {
   AlertDialog,
@@ -51,6 +52,7 @@ export default function ProductsPage() {
       setCreating(false)
       showToast(t("toast.productCreated"), "success")
     },
+    onError: (e: Error) => showToast(e.message, "error"),
   })
   const updateMut = useMutation({
     mutationFn: ({ id, ...data }: Partial<Product> & { id: string }) => admin.updateProduct(id, data),
@@ -58,6 +60,7 @@ export default function ProductsPage() {
       qc.invalidateQueries({ queryKey: ["admin", "products"] })
       setEditing(null)
     },
+    onError: (e: Error) => showToast(e.message, "error"),
   })
   const deleteMut = useMutation({
     mutationFn: (id: string) => admin.deleteProduct(id),
@@ -66,6 +69,7 @@ export default function ProductsPage() {
       setDeleting(null)
       showToast(t("toast.productDeleted"), "success")
     },
+    onError: (e: Error) => showToast(e.message, "error"),
   })
 
   const products = data?.products || []
@@ -157,14 +161,18 @@ export default function ProductsPage() {
         </CardContent>
       </Card>
 
-      {/* Create Dialog */}
-      <ProductDialog
-        open={creating}
-        onClose={() => setCreating(false)}
-        onSubmit={(d) => createMut.mutate(d)}
-        loading={createMut.isPending}
-        title={t("products.createTitle")}
-      />
+      {/* Create. Mounted only while open, so the form starts empty
+          every time — the state lives in the component, not the
+          dialog Radix unmounts. */}
+      {creating && (
+        <ProductDialog
+          open
+          onClose={() => setCreating(false)}
+          onSubmit={(d) => createMut.mutate(d)}
+          loading={createMut.isPending}
+          title={t("products.createTitle")}
+        />
+      )}
 
       {/* Edit Dialog */}
       {editing && (
@@ -225,7 +233,7 @@ function ProductDialog({
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault()
-    onSubmit(product ? { name, slug, type, feed_license_required: feedLicenseRequired } : { name, slug, type })
+    onSubmit({ name, slug, type, feed_license_required: feedLicenseRequired })
   }
 
   return (
@@ -286,9 +294,11 @@ function ProductDialog({
               />
             </div>
           </div>
-          {/* Only meaningful for products that ship releases; shown
-              when editing so a new product starts with public feeds. */}
-          {product && type !== "saas" && (
+          {/* Only products that ship releases have a feed to gate.
+              Offered at creation too: a product that has published
+              nothing handed out no feed, so gating it then costs no
+              waiting at all. */}
+          {type !== "saas" && (
             <div className="space-y-1">
               <div className="flex items-center gap-3">
                 <input
@@ -299,6 +309,11 @@ function ProductDialog({
                   className="h-4 w-4 rounded border-input accent-primary"
                 />
                 <Label htmlFor="feed-license-required">{t("products.feedLicenseRequired")}</Label>
+                {/* The rollout order and the header/token detail are
+                    for the one operator setting this up, not for
+                    everyone who opens the dialog: one line here, the
+                    rest on hover. */}
+                <HelpTip text={t("products.feedLicenseRequiredHelp")} />
               </div>
               <p className="text-xs text-muted-foreground">{t("products.feedLicenseRequiredHint")}</p>
             </div>

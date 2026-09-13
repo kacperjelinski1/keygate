@@ -839,8 +839,12 @@ components:
         skipped by dropping the key. A product must set
         `feed_license_required` before any of its plans can sell an
         update period or renewals; its feeds then answer 401
-        `LICENSE_KEY_REQUIRED` without a key or token. Other products
-        keep a public, ungated feed.
+        `LICENSE_KEY_REQUIRED` without a key or token. Turning it on
+        is a rollout, in this order: ship an updater that sends the
+        license, set the flag, wait out the links the public feed
+        already handed out (the admin API says how long), and only
+        then give a plan an update period. Other products keep a
+        public, ungated feed.
 
         An updater that cannot set headers uses `license_token`.
     LicenseToken:

@@ -41,6 +41,10 @@ func (s *Store) CreateProduct(ctx context.Context, p *model.Product) error {
 	if p.ID == "" {
 		p.ID = newID()
 	}
+	// bun's default RETURNING * fills the row back in, which matters
+	// here beyond created_at: feed_gated_at is stamped by the database
+	// when the row arrives already gated, and the wait before an
+	// update period may be sold runs from that instant.
 	_, err := s.DB.NewInsert().Model(p).Exec(ctx)
 	return err
 }

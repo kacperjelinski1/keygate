@@ -42,7 +42,7 @@ func (h *AuthHandler) requestIsHTTPS(c *gin.Context) bool {
 	if strings.EqualFold(strings.TrimSpace(proto), "https") {
 		return true
 	}
-	return strings.HasPrefix(strings.ToLower(h.Config.BaseURL), "https://")
+	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(h.Config.BaseURL)), "https://")
 }
 
 // setSecureCookie sets a cookie with SameSite=Lax for CSRF protection.

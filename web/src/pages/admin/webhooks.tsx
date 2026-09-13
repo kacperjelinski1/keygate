@@ -104,12 +104,14 @@ export default function WebhooksPage() {
       setNewSecret(data.secret)
       showToast(t("toast.webhookCreated"), "success")
     },
+    onError: (e: Error) => showToast(e.message, "error"),
   })
   const toggleMut = useMutation({
     mutationFn: ({ id, active }: { id: string; active: boolean }) => admin.updateWebhook(id, { active }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["admin", "webhooks"] })
     },
+    onError: (e: Error) => showToast(e.message, "error"),
   })
   const deleteMut = useMutation({
     mutationFn: (id: string) => admin.deleteWebhook(id),
@@ -117,6 +119,7 @@ export default function WebhooksPage() {
       qc.invalidateQueries({ queryKey: ["admin", "webhooks"] })
       setDeleting(null)
     },
+    onError: (e: Error) => showToast(e.message, "error"),
   })
   const testMut = useMutation({
     mutationFn: (id: string) => admin.testWebhook(id),

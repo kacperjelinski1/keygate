@@ -157,7 +157,8 @@ export const admin = {
     return get<{ products: Product[] }>(`/admin/products?${q}`)
   },
   getProduct: (id: string) => get<Product>(`/admin/products/${id}`),
-  createProduct: (data: { name: string; slug: string; type: string }) => post<Product>("/admin/products", data),
+  createProduct: (data: { name: string; slug: string; type: string; feed_license_required?: boolean }) =>
+    post<Product>("/admin/products", data),
   updateProduct: (id: string, data: Partial<Product>) => put<Product>(`/admin/products/${id}`, data),
   deleteProduct: (id: string) => del(`/admin/products/${id}`),
 

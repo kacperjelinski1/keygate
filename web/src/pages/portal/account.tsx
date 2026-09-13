@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { Check, Key, Mail, Pencil, Shield, User, X } from "lucide-react"
 import { useState } from "react"
+import { showToast } from "@/components/toast"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
@@ -30,6 +31,7 @@ export default function PortalAccountPage() {
       refetch() // Refresh auth user context
       qc.invalidateQueries({ queryKey: ["portal"] })
     },
+    onError: (e: Error) => showToast(e.message, "error"),
   })
 
   const licenses = data?.licenses || []

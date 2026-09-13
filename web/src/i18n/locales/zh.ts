@@ -76,9 +76,10 @@ const zh = {
   "products.title": "产品管理",
   "products.subtitle": "管理您的软件产品。",
   "products.new": "新建产品",
-  "products.feedLicenseRequired": "更新 feed 需要许可证密钥",
-  "products.feedLicenseRequiredHint":
-    "按维护期销售的产品在更新器能表明身份后开启，开启后不带凭证的 feed 返回 401。能设置请求头的更新器用 X-License-Key，不能的用 /license/verify 签发的令牌（license_token）。密钥放进 URL 会被直接拒绝：它会先留在代理和 CDN 日志里。",
+  "products.feedLicenseRequired": "更新 feed 需要许可证",
+  "products.feedLicenseRequiredHint": "本产品要卖维护期，先开这个。",
+  "products.feedLicenseRequiredHelp":
+    "打开后，更新 feed 只回应带许可证的请求——更新期已过的客户想装新版本，就只有这一道能拦住。\n\n先发一版会带许可证的更新器：还在跑旧版本的装机会从此收不到更新。",
   "products.slug": "标识符",
   "products.empty": "暂无产品",
   "products.deleteConfirm": "此操作不可撤销。已有许可证的产品无法删除。",
@@ -93,6 +94,7 @@ const zh = {
   "plans.licenseType": "许可类型",
   "plans.maxActivations": "最大激活数",
   "plans.maxSeats": "最大席位数",
+  "plans.maxSeatsHint": "0 表示不限席位。",
   "plans.licenseModel": "授权模型",
   "plans.modelStandard": "标准",
   "plans.modelFloating": "浮动 (并发)",
@@ -529,7 +531,8 @@ const zh = {
   "plans.quota": "配额",
   "plans.feature": "功能",
   "plans.updatesDays": "包含更新（天）",
-  "plans.updatesDaysHint": "0 表示永久更新。仅永久许可证适用，且产品的更新 feed 必须要求许可证密钥。",
+  "plans.updatesDaysHint":
+    "0 表示永久更新。仅永久许可证适用，且要先让产品的更新 feed 需要许可证——公开的 feed 会把更新期之后的版本照发不误。",
   "plans.renewalDays": "续费时长（天）",
   "plans.stripeRenewalPriceId": "Stripe 续费价格 ID",
   "plans.renewalHint": "用户在门户续费更新时支付的一次性价格。",
@@ -588,6 +591,9 @@ const zh = {
   "addons.deleteConfirm": "此操作将永久删除该附加组件。",
   "addons.formDesc": "配置附加组件详情。",
   "addons.description": "描述",
+  "addons.valueTrue": "启用（true）",
+  "addons.valueFalse": "关闭（false）",
+  "addons.quotaZeroHint": "整数，0 表示不限量。",
 
   // Error boundary
   // Toast messages

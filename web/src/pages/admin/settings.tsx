@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { ArrowUpCircle, Check, Mail, RefreshCw, Send, Shield, Trash2, UserPlus } from "lucide-react"
 import { useEffect, useState } from "react"
+import { showToast } from "@/components/toast"
 import {
   AlertDialog,
   AlertDialogAction,
@@ -112,10 +113,12 @@ export default function SettingsPage() {
       setSaved(true)
       setTimeout(() => setSaved(false), 3000)
     },
+    onError: (e: Error) => showToast(e.message, "error"),
   })
 
   const testEmailMut = useMutation({
     mutationFn: admin.sendTestEmail,
+    onError: (e: Error) => showToast(e.message, "error"),
   })
 
   const { data: versionData } = useQuery({
@@ -508,11 +511,13 @@ function TeamManagement() {
       qc.invalidateQueries({ queryKey: ["admin", "team"] })
       setEmail("")
     },
+    onError: (e: Error) => showToast(e.message, "error"),
   })
 
   const removeMut = useMutation({
     mutationFn: (id: string) => admin.removeTeamMember(id),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["admin", "team"] }),
+    onError: (e: Error) => showToast(e.message, "error"),
   })
 
   const members: User[] = data?.members || []

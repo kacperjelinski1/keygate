@@ -60,6 +60,7 @@ export default function PlansPage() {
       setCreating(false)
       showToast(t("toast.planCreated"), "success")
     },
+    onError: (e: Error) => showToast(e.message, "error"),
   })
   const updateMut = useMutation({
     mutationFn: ({ id, ...data }: Partial<Plan> & { id: string }) => admin.updatePlan(id, data),
@@ -67,6 +68,7 @@ export default function PlansPage() {
       qc.invalidateQueries({ queryKey: ["admin", "plans"] })
       setEditing(null)
     },
+    onError: (e: Error) => showToast(e.message, "error"),
   })
   const deleteMut = useMutation({
     mutationFn: (id: string) => admin.deletePlan(id),
@@ -75,6 +77,7 @@ export default function PlansPage() {
       setDeleting(null)
       showToast(t("toast.planDeleted"), "success")
     },
+    onError: (e: Error) => showToast(e.message, "error"),
   })
 
   if (!isLoading && products.length === 0) {
@@ -238,15 +241,19 @@ export default function PlansPage() {
         </CardContent>
       </Card>
 
-      {/* Create */}
-      <PlanDialog
-        open={creating}
-        onClose={() => setCreating(false)}
-        products={products}
-        onSubmit={(d) => createMut.mutate(d)}
-        loading={createMut.isPending}
-        title={t("plans.createTitle")}
-      />
+      {/* Create. Mounted only while open: the dialog keeps its form in
+          component state, so a permanently mounted one would hand the
+          next "New plan" whatever was typed — or created — last time. */}
+      {creating && (
+        <PlanDialog
+          open
+          onClose={() => setCreating(false)}
+          products={products}
+          onSubmit={(d) => createMut.mutate(d)}
+          loading={createMut.isPending}
+          title={t("plans.createTitle")}
+        />
+      )}
 
       {/* Edit */}
       {editing && (
@@ -382,7 +389,10 @@ function PlanDialog({
             <div className="space-y-2 col-span-2">
               <Label>{t("common.product")}</Label>
 
-              <Select value={form.product_id} onValueChange={(v) => set("product_id", v)}>
+              {/* A plan cannot move to another product — its licences
+                  and entitlements belong to this one, and the update
+                  endpoint takes no product_id. */}
+              <Select value={form.product_id} onValueChange={(v) => set("product_id", v)} disabled={!!plan}>
                 <SelectTrigger>
                   <SelectValue />
                 </SelectTrigger>
@@ -453,6 +463,7 @@ function PlanDialog({
                 <Input
                   type="number"
                   min={1}
+                  max={10000}
                   value={form.max_activations}
                   onChange={(e) => set("max_activations", Number(e.target.value))}
                 />
@@ -463,10 +474,12 @@ function PlanDialog({
                 <Label>{t("plans.maxSeats")}</Label>
                 <Input
                   type="number"
-                  min={1}
+                  min={0}
+                  max={100000}
                   value={form.max_seats}
                   onChange={(e) => set("max_seats", Number(e.target.value))}
                 />
+                <p className="text-xs text-muted-foreground">{t("plans.maxSeatsHint")}</p>
               </div>
             )}
             {supports.activations && (
@@ -489,6 +502,7 @@ function PlanDialog({
                 <Input
                   type="number"
                   min={1}
+                  max={1440}
                   value={form.floating_timeout}
                   onChange={(e) => set("floating_timeout", Number(e.target.value))}
                 />
@@ -512,6 +526,7 @@ function PlanDialog({
               <Input
                 type="number"
                 min={0}
+                max={365}
                 value={form.trial_days}
                 onChange={(e) => set("trial_days", Number(e.target.value))}
               />
@@ -521,6 +536,7 @@ function PlanDialog({
               <Input
                 type="number"
                 min={0}
+                max={365}
                 value={form.grace_days}
                 onChange={(e) => set("grace_days", Number(e.target.value))}
               />
@@ -660,6 +676,7 @@ function EntitlementSection({ planId, entitlements: initial }: { planId: string;
         stripe_meter_event_name: "",
       })
     },
+    onError: (e: Error) => showToast(e.message, "error"),
   })
 
   const deleteMut = useMutation({
@@ -668,6 +685,7 @@ function EntitlementSection({ planId, entitlements: initial }: { planId: string;
       qc.invalidateQueries({ queryKey: ["admin", "plans"] })
       setConfirmDelete(null)
     },
+    onError: (e: Error) => showToast(e.message, "error"),
   })
 
   return (

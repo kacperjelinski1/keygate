@@ -58,6 +58,7 @@ export default function AddonsPage() {
       qc.invalidateQueries({ queryKey: ["admin", "addons"] })
       setDeleting(null)
     },
+    onError: (e: Error) => showToast(e.message, "error"),
   })
 
   if (!isLoading && products.length === 0) {
@@ -237,6 +238,22 @@ function AddonDialog({
 
   const set = (k: string, v: string) => setForm((f) => ({ ...f, [k]: v }))
 
+  // The value's shape follows the type, and the server refuses a pair
+  // that does not match (a quota that is not a number would read as
+  // "no limit"). Carry the value across the switch rather than
+  // leaving the previous type's text behind.
+  const setValueType = (v: string) =>
+    setForm((f) => ({
+      ...f,
+      value_type: v,
+      value: v === "bool" ? (f.value === "false" ? "false" : "true") : /^\d+$/.test(f.value) ? f.value : "",
+      quota_period: v === "quota" ? f.quota_period || "monthly" : "",
+    }))
+
+  // Without onError a rejected save looks like nothing happening at
+  // all: the dialog stays open, the form keeps its values and the
+  // reason the server gave — a slug that is taken, a quota value that
+  // is not a number — never reaches the screen.
   const createMut = useMutation({
     mutationFn: () => (addon ? admin.updateAddon(addon.id, form) : admin.createAddon(form as any)),
     onSuccess: () => {
@@ -244,6 +261,7 @@ function AddonDialog({
       if (!addon) showToast(t("toast.addonCreated"), "success")
       onClose()
     },
+    onError: (e: Error) => showToast(e.message, "error"),
   })
 
   return (
@@ -263,7 +281,10 @@ function AddonDialog({
           <div className="grid grid-cols-2 gap-4">
             <div className="space-y-2 col-span-2">
               <Label>{t("common.product")}</Label>
-              <Select value={form.product_id} onValueChange={(v) => set("product_id", v)}>
+              {/* An addon cannot change product: licences hold it, and
+                  the update endpoint does not accept the field. Shown
+                  read-only rather than as a control that saves nothing. */}
+              <Select value={form.product_id} onValueChange={(v) => set("product_id", v)} disabled={!!addon}>
                 <SelectTrigger>
                   <SelectValue />
                 </SelectTrigger>
@@ -301,7 +322,7 @@ function AddonDialog({
             </div>
             <div className="space-y-2">
               <Label>{t("plans.valueType")}</Label>
-              <Select value={form.value_type} onValueChange={(v) => set("value_type", v)}>
+              <Select value={form.value_type} onValueChange={setValueType}>
                 <SelectTrigger>
                   <SelectValue />
                 </SelectTrigger>
@@ -315,7 +336,29 @@ function AddonDialog({
             </div>
             <div className="space-y-2">
               <Label>{t("plans.value")}</Label>
-              <Input value={form.value} onChange={(e) => set("value", e.target.value)} required />
+              {form.value_type === "bool" ? (
+                <Select value={form.value} onValueChange={(v) => set("value", v)}>
+                  <SelectTrigger>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="true">{t("addons.valueTrue")}</SelectItem>
+                    <SelectItem value="false">{t("addons.valueFalse")}</SelectItem>
+                  </SelectContent>
+                </Select>
+              ) : (
+                <Input
+                  value={form.value}
+                  onChange={(e) => set("value", e.target.value)}
+                  type={form.value_type === "int" || form.value_type === "quota" ? "number" : "text"}
+                  min={0}
+                  step={1}
+                  required
+                />
+              )}
+              {form.value_type === "quota" && (
+                <p className="text-xs text-muted-foreground">{t("addons.quotaZeroHint")}</p>
+              )}
             </div>
             {form.value_type === "quota" && (
               <>

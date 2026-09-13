@@ -333,6 +333,7 @@ function ActivationsSection({ license }: { license: PortalLicense }) {
     onSettled: () => {
       setRemoving(null)
     },
+    onError: (e: Error) => showToast(e.message, "error"),
   })
 
   // Read-only path for unauthorised (pending-seat) viewers, and a
@@ -635,6 +636,7 @@ function InviteSeatDialog({ license, onClose }: { license: PortalLicense; onClos
       qc.invalidateQueries({ queryKey: ["portal", "seats", license.id] })
       onClose()
     },
+    onError: (e: Error) => showToast(e.message, "error"),
   })
 
   const trimmed = email.trim()
@@ -780,6 +782,7 @@ function CancelDialog({
       qc.invalidateQueries({ queryKey: ["portal", "licenses"] })
       onClose()
     },
+    onError: (e: Error) => showToast(e.message, "error"),
   })
 
   return (
@@ -894,6 +897,7 @@ function ChangePlanDialog({ license, onClose }: { license: PortalLicense; onClos
       qc.invalidateQueries({ queryKey: ["portal", "licenses"] })
       onClose()
     },
+    onError: (e: Error) => showToast(e.message, "error"),
   })
 
   return (
