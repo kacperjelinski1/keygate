@@ -736,6 +736,7 @@ export interface Entitlement {
   value: string
   quota_period?: string
   quota_unit?: string
+  stripe_meter_event_name?: string
 }
 
 export interface License {

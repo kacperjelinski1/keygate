@@ -11,6 +11,7 @@ const en = {
   "common.noData": "No data",
   "common.confirm": "Confirm",
   "common.optional": "optional",
+  "common.clear": "Clear",
 
   // Accept-invite landing page
   "acceptInvite.processing": "Accepting your invitation…",
@@ -118,6 +119,7 @@ const en = {
   "plans.formDesc": "Configure the plan details.",
   "plans.entitlements": "Entitlements",
   "plans.addEntitlement": "Add Entitlement",
+  "plans.noEntitlements": "No entitlements configured for this plan.",
   "plans.deleteEntitlementTitle": "Delete {feature}?",
   "plans.deleteEntitlementDesc":
     "This removes the entitlement from this plan immediately. Existing licenses lose access to the feature.",
@@ -138,6 +140,9 @@ const en = {
   "licenses.validUntilHint": "Leave empty for a perpetual license (trials still use the plan's trial days).",
   "licenses.validUntilEdit": "Edit expiry",
   "licenses.validUntilClear": "Leave empty to make the license perpetual.",
+  "licenses.validUntilPerpetualHint":
+    "This plan is perpetual. The license will be issued with no expiration date (valid_until = NULL).",
+  "licenses.clearToPerpetual": "Clear (Perpetual)",
   "licenses.validUntilExpiredHint":
     "This license is expired — a new date alone won't reactivate it. Use Reinstate as well.",
   "licenses.empty": "No licenses found",

@@ -389,8 +389,8 @@ function PlanDialog({
 
   return (
     <Dialog open={open} onOpenChange={onClose}>
-      <DialogContent className="max-w-lg">
-        <DialogHeader>
+      <DialogContent className="max-w-lg sm:max-w-xl max-h-[85vh] flex flex-col overflow-hidden">
+        <DialogHeader className="shrink-0">
           <DialogTitle>{title}</DialogTitle>
           <DialogDescription>{t("plans.formDesc")}</DialogDescription>
         </DialogHeader>
@@ -399,9 +399,9 @@ function PlanDialog({
             e.preventDefault()
             handleSubmit()
           }}
-          className="flex min-h-0 flex-1 flex-col gap-4"
+          className="flex min-h-0 flex-1 flex-col overflow-hidden"
         >
-          <DialogBody className="space-y-4">
+          <DialogBody className="space-y-6">
             <div className="grid grid-cols-2 gap-4">
               <div className="space-y-2 col-span-2">
                 <Label>{t("common.product")}</Label>
@@ -609,8 +609,16 @@ function PlanDialog({
                 </>
               )}
             </div>
+
+            {/* Entitlements section (only when editing) */}
+            {plan && (
+              <div className="space-y-4 pt-2">
+                <Separator />
+                <EntitlementSection planId={plan.id} entitlements={plan.entitlements || []} />
+              </div>
+            )}
           </DialogBody>
-          <DialogFooter>
+          <DialogFooter className="shrink-0 border-t pt-3">
             <Button type="button" variant="outline" onClick={onClose}>
               {t("common.cancel")}
             </Button>
@@ -619,14 +627,6 @@ function PlanDialog({
             </Button>
           </DialogFooter>
         </form>
-
-        {/* Entitlements section (only when editing) */}
-        {plan && (
-          <>
-            <Separator />
-            <EntitlementSection planId={plan.id} entitlements={plan.entitlements || []} />
-          </>
-        )}
       </DialogContent>
     </Dialog>
   )
@@ -704,42 +704,19 @@ function EntitlementSection({ planId, entitlements: initial }: { planId: string;
   return (
     <div className="space-y-3">
       <div className="flex items-center justify-between">
-        <h4 className="text-sm font-semibold">{t("plans.entitlements")}</h4>
+        <div>
+          <h4 className="text-sm font-semibold">{t("plans.entitlements")}</h4>
+          <p className="text-xs text-muted-foreground">
+            {entitlements.length} {t("plans.entitlements").toLowerCase()}
+          </p>
+        </div>
         <Button type="button" variant="outline" size="sm" onClick={() => setAdding(!adding)}>
-          <Plus className="h-3 w-3 mr-1" /> {t("common.create")}
+          <Plus className="h-3.5 w-3.5 mr-1" /> {t("plans.addEntitlement")}
         </Button>
       </div>
-      {entitlements.length > 0 && (
-        <div className="space-y-2">
-          {entitlements.map((e) => (
-            <div key={e.id} className="flex items-center justify-between bg-muted/50 rounded px-3 py-2 text-sm">
-              <div>
-                <span className="font-medium">{e.feature}</span>
-                <span className="text-muted-foreground ml-2">
-                  ({e.value_type}: {e.value})
-                </span>
-                {e.quota_period && (
-                  <span className="text-muted-foreground ml-1">
-                    / {e.quota_period}
-                    {e.quota_unit ? ` (${e.quota_unit})` : ""}
-                  </span>
-                )}
-              </div>
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon"
-                className="h-7 w-7"
-                onClick={() => setConfirmDelete({ id: e.id, feature: e.feature })}
-              >
-                <Trash2 className="h-3 w-3 text-destructive" />
-              </Button>
-            </div>
-          ))}
-        </div>
-      )}
+
       {adding && (
-        <div className="border rounded p-3 space-y-3">
+        <div className="border rounded-md p-3 space-y-3 bg-muted/30">
           <div className="grid grid-cols-2 gap-3">
             <div className="space-y-2">
               <Label className="text-xs">{t("plans.feature")}</Label>
@@ -825,9 +802,54 @@ function EntitlementSection({ planId, entitlements: initial }: { planId: string;
               disabled={createMut.isPending || !newEnt.feature}
               onClick={() => createMut.mutate()}
             >
-              {createMut.isPending ? t("common.loading") : t("plans.addEntitlement")}
+              {createMut.isPending ? t("common.loading") : t("common.create")}
             </Button>
           </div>
+        </div>
+      )}
+
+      {entitlements.length > 0 ? (
+        <div className="space-y-2 max-h-56 overflow-y-auto pr-1 rounded-md border p-2 bg-muted/20">
+          {entitlements.map((e) => (
+            <div
+              key={e.id}
+              className="flex items-center justify-between rounded-md border bg-card px-3 py-2 text-sm shadow-xs"
+            >
+              <div className="min-w-0 flex-1 mr-2">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <span className="font-medium text-foreground truncate">{e.feature}</span>
+                  <span className="text-xs px-1.5 py-0.5 rounded bg-muted text-muted-foreground font-mono">
+                    {e.value_type}: {e.value}
+                  </span>
+                  {e.quota_period && (
+                    <span className="text-xs text-muted-foreground">
+                      / {e.quota_period}
+                      {e.quota_unit ? ` (${e.quota_unit})` : ""}
+                    </span>
+                  )}
+                </div>
+                {e.stripe_meter_event_name && (
+                  <p className="text-[10px] text-muted-foreground truncate mt-0.5">
+                    Stripe: {e.stripe_meter_event_name}
+                  </p>
+                )}
+              </div>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                className="h-7 w-7 shrink-0 text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-colors"
+                onClick={() => setConfirmDelete({ id: e.id, feature: e.feature })}
+                title={t("common.delete")}
+              >
+                <Trash2 className="h-3.5 w-3.5" />
+              </Button>
+            </div>
+          ))}
+        </div>
+      ) : (
+        <div className="rounded-md border border-dashed p-4 text-center text-xs text-muted-foreground">
+          {t("plans.noEntitlements")}
         </div>
       )}
 

@@ -504,6 +504,16 @@ func (s *Store) prepareLicenseForInsert(l *model.License) error {
 		l.ID = newID()
 	}
 	l.KeyHash = license.HashKey(l.LicenseKey)
+	now := time.Now()
+	if l.CreatedAt.IsZero() {
+		l.CreatedAt = now
+	}
+	if l.UpdatedAt.IsZero() {
+		l.UpdatedAt = now
+	}
+	if l.ValidFrom.IsZero() {
+		l.ValidFrom = now
+	}
 	if s.LicenseKeyAEAD != nil && l.LicenseKey != "" {
 		ct, err := s.LicenseKeyAEAD.Encrypt([]byte(l.LicenseKey), []byte(l.ID))
 		if err != nil {
@@ -622,16 +632,18 @@ func (s *Store) CreateLicenseWithSubscriptionIn(ctx context.Context, tx bun.Tx, 
 	}
 
 	if plan != nil && (planType == "subscription" || planType == "trial") {
+		subNow := time.Now()
 		sub := &model.Subscription{
 			ID:        newID(),
 			LicenseID: l.ID,
 			PlanID:    plan.ID,
 			Status:    l.Status,
+			CreatedAt: subNow,
+			UpdatedAt: subNow,
 		}
 		if planType == "trial" && planTrialDays > 0 {
-			now := time.Now()
-			sub.TrialStart = &now
-			until := now.Add(time.Duration(planTrialDays) * 24 * time.Hour)
+			sub.TrialStart = &subNow
+			until := subNow.Add(time.Duration(planTrialDays) * 24 * time.Hour)
 			sub.TrialEnd = &until
 		}
 		if _, err := tx.NewInsert().Model(sub).Exec(ctx); err != nil {
@@ -949,6 +961,9 @@ func (s *Store) FindExpiringLicenses(ctx context.Context, from, to time.Time) ([
 func (s *Store) Audit(ctx context.Context, log *model.AuditLog) {
 	if log.ID == "" {
 		log.ID = newID()
+	}
+	if log.CreatedAt.IsZero() {
+		log.CreatedAt = time.Now()
 	}
 	go func() {
 		auditCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -1924,15 +1939,24 @@ func LockProductIn(ctx context.Context, tx bun.IDB, id string) (*model.Product, 
 // would abort one of them — a paid fulfilment or an admin edit,
 // depending on which lost.
 func LockReferencedRowsIn(ctx context.Context, db bun.IDB, planID, productID string) error {
+	isSQLite := strings.Contains(strings.ToLower(db.Dialect().Name().String()), "sqlite")
 	if planID != "" {
 		var id string
-		if err := db.NewRaw("SELECT id FROM plans WHERE id = ? FOR KEY SHARE", planID).Scan(ctx, &id); err != nil {
+		q := "SELECT id FROM plans WHERE id = ? FOR KEY SHARE"
+		if isSQLite {
+			q = "SELECT id FROM plans WHERE id = ?"
+		}
+		if err := db.NewRaw(q, planID).Scan(ctx, &id); err != nil {
 			return err
 		}
 	}
 	if productID != "" {
 		var id string
-		if err := db.NewRaw("SELECT id FROM products WHERE id = ? FOR KEY SHARE", productID).Scan(ctx, &id); err != nil {
+		q := "SELECT id FROM products WHERE id = ? FOR KEY SHARE"
+		if isSQLite {
+			q = "SELECT id FROM products WHERE id = ?"
+		}
+		if err := db.NewRaw(q, productID).Scan(ctx, &id); err != nil {
 			return err
 		}
 	}

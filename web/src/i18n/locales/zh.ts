@@ -11,6 +11,7 @@ const zh = {
   "common.noData": "暂无数据",
   "common.confirm": "确认",
   "common.optional": "可选",
+  "common.clear": "清除",
 
   // 接受邀请落地页
   "acceptInvite.processing": "正在接受邀请…",
@@ -117,6 +118,7 @@ const zh = {
   "plans.formDesc": "配置方案详细信息。",
   "plans.entitlements": "权益配置",
   "plans.addEntitlement": "添加权益",
+  "plans.noEntitlements": "该方案尚未配置任何权益。",
   "plans.deleteEntitlementTitle": "删除 {feature}?",
   "plans.deleteEntitlementDesc": "此操作会立即从该套餐中移除该权益,所有该套餐的 license 将失去该 feature 的访问权限。",
   "plans.stripeMeterEventName": "Stripe meter event name(可选)",
@@ -136,6 +138,8 @@ const zh = {
   "licenses.validUntilHint": "留空表示永久许可证（试用版仍按套餐的试用天数计算）。",
   "licenses.validUntilEdit": "编辑到期时间",
   "licenses.validUntilClear": "留空表示永久许可证。",
+  "licenses.validUntilPerpetualHint": "该方案为永久方案。许可证将无到期日期（valid_until = NULL）。",
+  "licenses.clearToPerpetual": "清除（永久）",
   "licenses.validUntilExpiredHint": "此许可证已过期 — 仅修改日期不会重新激活，还需执行「恢复」。",
   "licenses.empty": "未找到许可证",
   "licenses.noProducts": "暂无产品",

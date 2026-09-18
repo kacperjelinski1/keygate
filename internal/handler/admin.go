@@ -1958,9 +1958,12 @@ func (h *AdminHandler) CreateLicense(c *gin.Context) {
 		ExternalWorkspaceID: req.ExternalWorkspaceID,
 	}
 
-	// Set valid_until: an explicit request value wins, otherwise trial
+	// Set valid_until: perpetual plans have no expiry (valid_until is NULL).
+	// For other plans, an explicit request value wins, otherwise trial
 	// plans default to now+trial_days and other plans stay perpetual.
-	if validUntil != nil {
+	if plan.LicenseType == "perpetual" {
+		l.ValidUntil = nil
+	} else if validUntil != nil {
 		l.ValidUntil = validUntil
 	} else if plan.LicenseType == "trial" && plan.TrialDays > 0 {
 		until := time.Now().Add(time.Duration(plan.TrialDays) * 24 * time.Hour)

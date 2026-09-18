@@ -446,7 +446,9 @@ func (h *CRMHandler) CreateSale(c *gin.Context) {
 	}
 
 	var validUntil *time.Time
-	if req.ValidUntil != "" {
+	if plan.LicenseType == "perpetual" {
+		validUntil = nil
+	} else if req.ValidUntil != "" {
 		ts, err := time.Parse(time.RFC3339, req.ValidUntil)
 		if err != nil {
 			response.BadRequest(c, "valid_until must be an RFC 3339 timestamp")

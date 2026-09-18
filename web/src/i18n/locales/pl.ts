@@ -35,6 +35,7 @@ const pl: Record<string, string> = {
   "common.showing": "Wyświetlanie {start} do {end} z {total}",
   "common.required": "Wymagane",
   "common.optional": "Opcjonalne",
+  "common.clear": "Wyczyść",
 
   // Navigation
   "nav.dashboard": "Pulpit",
@@ -120,6 +121,7 @@ const pl: Record<string, string> = {
   "plans.maintenanceMonths": "Miesiące wsparcia",
   "plans.entitlements": "Uprawnienia",
   "plans.addEntitlement": "Dodaj uprawnienie",
+  "plans.noEntitlements": "Brak uprawnień skonfigurowanych dla tego planu.",
   "plans.featureName": "Nazwa funkcji (capability)",
   "plans.featureValue": "Wartość",
 
@@ -136,6 +138,14 @@ const pl: Record<string, string> = {
   "licenses.status": "Status",
   "licenses.validFrom": "Ważna od",
   "licenses.validUntil": "Ważna do",
+  "licenses.perpetual": "Bezterminowa (Perpetual)",
+  "licenses.validUntilOptional": "Ważna do (opcjonalnie)",
+  "licenses.validUntilHint":
+    "Pozostaw puste dla licencji bezterminowej (wersje trial nadal używają dni testowych planu).",
+  "licenses.validUntilClear": "Pozostaw puste, aby licencja była bezterminowa.",
+  "licenses.validUntilPerpetualHint":
+    "Wybrany plan jest bezterminowy (perpetual). Licencja zostanie wystawiona bez daty wygaśnięcia (valid_until = NULL).",
+  "licenses.clearToPerpetual": "Wyczyść (Bezterminowa)",
   "licenses.updatesUntil": "Aktualizacje do",
   "licenses.activations": "Aktywacje",
   "licenses.empty": "Brak licencji.",

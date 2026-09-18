@@ -14,7 +14,7 @@ import {
   Trash2,
   Unlink,
 } from "lucide-react"
-import { useState } from "react"
+import { useEffect, useState } from "react"
 import { Link } from "react-router-dom"
 import { PlanSelect } from "@/components/plan-select"
 import { ProductSelect } from "@/components/product-select"
@@ -313,6 +313,20 @@ function CreateLicenseDialog({
     queryFn: () => admin.getProduct(productId),
     enabled: !!productId,
   })
+
+  const { data: selectedPlan } = useQuery({
+    queryKey: ["admin", "plan", planId],
+    queryFn: () => admin.getPlan(planId),
+    enabled: !!planId,
+  })
+  const isPerpetual = selectedPlan?.license_type === "perpetual"
+
+  useEffect(() => {
+    if (isPerpetual) {
+      setValidUntil("")
+    }
+  }, [isPerpetual])
+
   const productType = selectedProduct?.type
   const typeHintKey =
     productType === "desktop"
@@ -340,7 +354,7 @@ function CreateLicenseDialog({
               notes,
               external_customer_id: externalCustomerID.trim() || undefined,
               external_workspace_id: externalWorkspaceID.trim() || undefined,
-              valid_until: validUntil ? endOfDayISO(validUntil) : undefined,
+              valid_until: isPerpetual ? undefined : validUntil ? endOfDayISO(validUntil) : undefined,
             })
           }}
           className="flex min-h-0 flex-1 flex-col gap-4"
@@ -378,16 +392,40 @@ function CreateLicenseDialog({
               <Label>{t("licenses.notesOptional")}</Label>
               <Input value={notes} onChange={(e) => setNotes(e.target.value)} />
             </div>
-            <div className="space-y-2">
-              <Label>{t("licenses.validUntilOptional")}</Label>
-              <Input
-                type="date"
-                value={validUntil}
-                min={new Date().toISOString().slice(0, 10)}
-                onChange={(e) => setValidUntil(e.target.value)}
-              />
-              <p className="text-xs text-muted-foreground">{t("licenses.validUntilHint")}</p>
-            </div>
+            {isPerpetual ? (
+              <div className="space-y-2">
+                <Label>{t("licenses.validUntil")}</Label>
+                <div className="flex items-center justify-between rounded-md border border-input bg-muted/50 px-3 py-2 text-sm">
+                  <span className="font-medium text-foreground">{t("licenses.perpetual")}</span>
+                  <Badge variant="outline" className="text-xs bg-background/80 font-mono">
+                    valid_until = NULL
+                  </Badge>
+                </div>
+                <p className="text-xs text-muted-foreground">{t("licenses.validUntilPerpetualHint")}</p>
+              </div>
+            ) : (
+              <div className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <Label>{t("licenses.validUntilOptional")}</Label>
+                  {validUntil && (
+                    <button
+                      type="button"
+                      onClick={() => setValidUntil("")}
+                      className="text-xs text-muted-foreground hover:text-foreground transition-colors"
+                    >
+                      {t("common.clear")}
+                    </button>
+                  )}
+                </div>
+                <Input
+                  type="date"
+                  value={validUntil}
+                  min={new Date().toISOString().slice(0, 10)}
+                  onChange={(e) => setValidUntil(e.target.value)}
+                />
+                <p className="text-xs text-muted-foreground">{t("licenses.validUntilHint")}</p>
+              </div>
+            )}
             {/* External identifiers — opaque strings the merchant uses
               to map their own user/workspace model to this license.
               Both optional; leave blank if not integrating with an
@@ -620,13 +658,25 @@ function LicenseDetail({ id, onClose }: { id: string; onClose: () => void }) {
                       </div>
                     ) : (
                       <div className="mt-1 space-y-1">
-                        <div className="flex items-center gap-1">
+                        <div className="flex items-center gap-1 flex-wrap">
                           <Input
                             type="date"
                             className="h-7 w-40 text-xs"
                             value={editingValidUntil}
                             onChange={(e) => setEditingValidUntil(e.target.value)}
                           />
+                          {editingValidUntil && (
+                            <Button
+                              type="button"
+                              size="sm"
+                              variant="outline"
+                              className="h-7 text-xs"
+                              onClick={() => setEditingValidUntil("")}
+                              title={t("licenses.clearToPerpetual")}
+                            >
+                              {t("licenses.clearToPerpetual")}
+                            </Button>
+                          )}
                           <Button
                             size="sm"
                             className="h-7"
@@ -641,7 +691,13 @@ function LicenseDetail({ id, onClose }: { id: string; onClose: () => void }) {
                             {t("common.cancel")}
                           </Button>
                         </div>
-                        <p className="text-xs text-muted-foreground">{t("licenses.validUntilClear")}</p>
+                        {editingValidUntil === "" ? (
+                          <p className="text-xs font-medium text-emerald-600 dark:text-emerald-400">
+                            {t("licenses.validUntilPerpetualHint")}
+                          </p>
+                        ) : (
+                          <p className="text-xs text-muted-foreground">{t("licenses.validUntilClear")}</p>
+                        )}
                         {/* An expired license stays dead no matter what date
                           is set — assertUsable short-circuits on the status
                           before it ever reads valid_until. Say so, or the
