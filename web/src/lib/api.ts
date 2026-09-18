@@ -154,7 +154,7 @@ export const portal = {
 // Builds a list request's query string. Empty and undefined values
 // are left out so a filter that is not set does not become one that
 // matches the empty string.
-function listQuery(params?: Record<string, string | number | undefined>) {
+function listQuery(params?: Record<string, string | number | boolean | undefined>) {
   const q = new URLSearchParams()
   for (const [k, v] of Object.entries(params || {})) {
     if (v !== undefined && v !== "" && v !== null) q.set(k, String(v))
@@ -490,6 +490,188 @@ export const admin = {
       body: JSON.stringify({ note }),
     }),
   publicKeyURL: (productId: string) => `${BASE}/admin/products/${productId}/signing-key/public.pem`,
+
+  // ─── Multi-Servis CRM ───
+  crm: {
+    listCustomers: (params?: { search?: string; archived?: boolean; offset?: number; limit?: number }) =>
+      get<{ customers: CRMCustomerListItem[]; total: number; offset: number; limit: number }>(
+        `/admin/crm/customers?${listQuery(params)}`,
+      ),
+    getCustomer: (id: string) => get<CRMCustomerDetail>(`/admin/crm/customers/${id}`),
+    createCustomer: (data: {
+      first_name: string
+      last_name: string
+      phone: string
+      email?: string
+      customer_since?: string
+      notes?: string
+    }) => post<CRMCustomer>("/admin/crm/customers", data),
+    updateCustomer: (
+      id: string,
+      data: {
+        first_name?: string
+        last_name?: string
+        phone?: string
+        email?: string
+        customer_since?: string
+        notes?: string
+      },
+    ) => put<CRMCustomer>(`/admin/crm/customers/${id}`, data),
+    archiveCustomer: (id: string) => del<{ status: string }>(`/admin/crm/customers/${id}`),
+    checkDuplicates: (data: { phone?: string; email?: string; exclude_id?: string }) =>
+      post<{ exact_phone_match: CRMCustomer[]; exact_email_match: CRMCustomer[]; has_duplicates: boolean }>(
+        "/admin/crm/customers/check-duplicate",
+        data,
+      ),
+    mergeCustomers: (data: { source_customer_id: string; target_customer_id: string }) =>
+      post<{ status: string }>("/admin/crm/customers/merge", data),
+    createSale: (
+      customerId: string,
+      data: {
+        product_id: string
+        plan_id: string
+        email?: string
+        notes?: string
+        valid_until?: string
+        payment_method?: string
+        amount?: number
+        currency?: string
+      },
+    ) =>
+      post<{ license: License; license_key: string; customer_id: string }>(
+        `/admin/crm/customers/${customerId}/sale`,
+        data,
+      ),
+    renewLicense: (
+      customerId: string,
+      licenseId: string,
+      data: {
+        duration_months?: number
+        custom_valid_until?: string
+        payment_method?: string
+        amount?: number
+        currency?: string
+        notes?: string
+      },
+    ) =>
+      post<{ status: string; license: License; valid_until: string }>(
+        `/admin/crm/customers/${customerId}/licenses/${licenseId}/renew`,
+        data,
+      ),
+    assignLicense: (customerId: string, licenseId: string) =>
+      post<any>(`/admin/crm/customers/${customerId}/licenses/assign`, { license_id: licenseId }),
+    reassignLicense: (data: {
+      license_id: string
+      from_customer_id: string
+      to_customer_id: string
+      reason?: string
+    }) => post<{ status: string }>("/admin/crm/licenses/reassign", data),
+    recordEvent: (
+      customerId: string,
+      data: {
+        event_type: string
+        keygate_license_id?: string
+        payment_method?: string
+        amount?: number
+        currency?: string
+        notes?: string
+        period_from?: string
+        period_until?: string
+      },
+    ) => post<CRMCustomerEvent>(`/admin/crm/customers/${customerId}/events`, data),
+  },
+}
+
+// ─── Multi-Servis CRM Types ───
+
+export interface CRMCustomer {
+  id: string
+  first_name: string
+  last_name: string
+  phone: string
+  normalized_phone: string
+  email?: string
+  normalized_email?: string
+  customer_since: string
+  notes: string
+  archived_at?: string
+  created_at: string
+  updated_at: string
+}
+
+export interface CRMCustomerListItem extends CRMCustomer {
+  active_licenses_count: number
+  current_product: string
+  current_plan: string
+  billing_period: string
+  valid_until?: string
+  status: string
+}
+
+export interface CRMCustomerStats {
+  customer_since: string
+  active_licenses_count: number
+  total_licenses_count: number
+  purchases_count: number
+  renewals_count: number
+  last_purchase_date?: string
+  current_products: string[]
+  current_plans: string[]
+  active_days: number
+  gaps_count: number
+  gap_days: number
+  gaps: Array<{ from: string; to: string; days: number }>
+}
+
+export interface CRMLicenseItem extends License {
+  license_key_hint: string
+  assigned_at: string
+  ended_at?: string
+  is_current: boolean
+  activations_count: number
+}
+
+export interface CRMTimelineItem {
+  id: string
+  kind: "event" | "gap"
+  event_type?: string
+  date: string
+  title: string
+  description?: string
+  period_from?: string
+  period_until?: string
+  payment_method?: string
+  amount?: number
+  currency?: string
+  license_key_hint?: string
+  license_id?: string
+  product_name?: string
+  plan_name?: string
+  gap_days?: number
+}
+
+export interface CRMCustomerDetail {
+  customer: CRMCustomer
+  stats: CRMCustomerStats
+  active_licenses: CRMLicenseItem[]
+  license_history: CRMLicenseItem[]
+  timeline: CRMTimelineItem[]
+}
+
+export interface CRMCustomerEvent {
+  id: string
+  customer_id: string
+  keygate_license_id?: string
+  event_type: string
+  occurred_at: string
+  period_from?: string
+  period_until?: string
+  payment_method?: string
+  amount?: number
+  currency: string
+  notes?: string
+  metadata?: Record<string, any>
+  created_at: string
 }
 
 // ─── Types ───

@@ -312,6 +312,7 @@ func main() {
 	expiryChecker := service.NewExpiryChecker(db, emailSvc, webhookSvc, logger)
 	meteredSyncer := service.NewMeteredBillingSyncer(db, logger)
 	adminH := handler.NewAdminHandler(db, webhookSvc, emailSvc, expiryChecker, meteredSyncer)
+	crmH := handler.NewCRMHandler(db, emailSvc, webhookSvc)
 	// An update period may only be written once the links a public
 	// feed handed out have expired, and this is how long they live.
 	// The admin API and the fulfilment guard measure the same wait
@@ -1084,6 +1085,20 @@ func main() {
 		admin.GET("/audit-logs", adminH.ListAuditLogs)
 		admin.GET("/users", adminH.ListUsers)
 		admin.GET("/users/:id", adminH.GetUserDetail)
+
+		// ─── Multi-Servis CRM ───
+		admin.GET("/crm/customers", crmH.ListCustomers)
+		admin.POST("/crm/customers", crmH.CreateCustomer)
+		admin.GET("/crm/customers/:id", crmH.GetCustomer)
+		admin.PUT("/crm/customers/:id", crmH.UpdateCustomer)
+		admin.DELETE("/crm/customers/:id", crmH.ArchiveCustomer)
+		admin.POST("/crm/customers/check-duplicate", crmH.CheckDuplicates)
+		admin.POST("/crm/customers/merge", crmH.MergeCustomers)
+		admin.POST("/crm/customers/:id/sale", crmH.CreateSale)
+		admin.POST("/crm/customers/:id/licenses/:lic_id/renew", crmH.RenewLicense)
+		admin.POST("/crm/customers/:id/licenses/assign", crmH.AssignExistingLicense)
+		admin.POST("/crm/licenses/reassign", crmH.ReassignLicense)
+		admin.POST("/crm/customers/:id/events", crmH.RecordCustomerEventManual)
 
 		// ─── Releases (industry-standard bundle model) ───
 		// Resource: release with multiple platform artifacts (mirrors

@@ -933,6 +933,13 @@ func (h *StripeHandler) fulfillCheckout(ctx context.Context, email, customerID, 
 		_ = h.Store.UpdateLicenseUser(ctx, lic.ID, u.ID)
 	}
 
+	// Link license to CRM customer if exists
+	externalID := sessionID
+	if externalID == "" {
+		externalID = paymentIntentID
+	}
+	_ = h.Store.LinkStripeLicenseToCRM(ctx, lic, email, externalID)
+
 	productName := h.productName(ctx, plan.ProductID)
 	if email != "" {
 		// Use DecryptLicenseKey for forward compatibility — Phase C will

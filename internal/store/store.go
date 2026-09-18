@@ -49,6 +49,11 @@ func New(dsn string) (*Store, error) {
 	return &Store{DB: db}, nil
 }
 
+// NewWithDB wraps an existing bun.DB instance (useful for testing with in-memory databases).
+func NewWithDB(db *bun.DB) *Store {
+	return &Store{DB: db}
+}
+
 func (s *Store) Close() error { return s.DB.Close() }
 
 // RunMigrations executes all .up.sql files from the migrations directory in order.
@@ -520,15 +525,16 @@ func (s *Store) CreateLicense(ctx context.Context, l *model.License) error {
 // CreateLicenseWithSubscription creates a license and, for subscription/trial plans,
 // a subscription record in a single transaction to prevent orphan records.
 func (s *Store) CreateLicenseWithSubscription(ctx context.Context, l *model.License, plan *model.Plan) error {
+	return s.RunInTx(ctx, func(ctx context.Context, tx bun.Tx) error {
+		return s.CreateLicenseWithSubscriptionIn(ctx, tx, l, plan)
+	})
+}
+
+// CreateLicenseWithSubscriptionIn creates a license and subscription record inside an existing transaction.
+func (s *Store) CreateLicenseWithSubscriptionIn(ctx context.Context, tx bun.Tx, l *model.License, plan *model.Plan) error {
 	if err := s.prepareLicenseForInsert(l); err != nil {
 		return err
 	}
-
-	tx, err := s.DB.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
 
 	// The rows this insert references are locked first and the gate
 	// after: the other order deadlocks against a product or plan
@@ -633,7 +639,7 @@ func (s *Store) CreateLicenseWithSubscription(ctx context.Context, l *model.Lice
 		}
 	}
 
-	return tx.Commit()
+	return nil
 }
 
 func (s *Store) FindLicenseByKey(ctx context.Context, key string) (*model.License, error) {
