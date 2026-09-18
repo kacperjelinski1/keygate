@@ -197,6 +197,13 @@ func (s *Store) CheckCustomerDuplicates(ctx context.Context, phone, email, exclu
 		}
 	}
 
+	if res.ExactPhoneMatch == nil {
+		res.ExactPhoneMatch = make([]*model.MultiCustomer, 0)
+	}
+	if res.ExactEmailMatch == nil {
+		res.ExactEmailMatch = make([]*model.MultiCustomer, 0)
+	}
+
 	res.HasDuplicates = len(res.ExactPhoneMatch) > 0 || len(res.ExactEmailMatch) > 0
 	return res, nil
 }
@@ -210,7 +217,7 @@ func (s *Store) ListCustomers(ctx context.Context, search string, includeArchive
 		offset = 0
 	}
 
-	var customers []*model.MultiCustomer
+	customers := make([]*model.MultiCustomer, 0)
 	q := s.DB.NewSelect().Model(&customers)
 
 	if !includeArchived {
@@ -248,6 +255,9 @@ func (s *Store) ListCustomers(ctx context.Context, search string, includeArchive
 	}
 
 	total, err := q.Order("created_at DESC").Offset(offset).Limit(limit).ScanAndCount(ctx)
+	if customers == nil {
+		customers = make([]*model.MultiCustomer, 0)
+	}
 	return customers, total, err
 }
 
@@ -609,7 +619,7 @@ func (s *Store) RenewCustomerLicenseInTx(
 
 // ListCustomerLicenseAssignments lists all license records for a customer.
 func (s *Store) ListCustomerLicenseAssignments(ctx context.Context, customerID string) ([]*model.MultiCustomerLicense, error) {
-	var list []*model.MultiCustomerLicense
+	list := make([]*model.MultiCustomerLicense, 0)
 	err := s.DB.NewSelect().
 		Model(&list).
 		Where("customer_id = ?", customerID).
@@ -618,6 +628,9 @@ func (s *Store) ListCustomerLicenseAssignments(ctx context.Context, customerID s
 		Relation("License.Plan").
 		Order("multi_customer_license.created_at DESC").
 		Scan(ctx)
+	if list == nil {
+		list = make([]*model.MultiCustomerLicense, 0)
+	}
 	return list, err
 }
 
@@ -644,12 +657,15 @@ func (s *Store) RecordCustomerEvent(ctx context.Context, ev *model.MultiCustomer
 
 // ListCustomerEvents lists events for a customer.
 func (s *Store) ListCustomerEvents(ctx context.Context, customerID string) ([]*model.MultiCustomerEvent, error) {
-	var events []*model.MultiCustomerEvent
+	events := make([]*model.MultiCustomerEvent, 0)
 	err := s.DB.NewSelect().
 		Model(&events).
 		Where("customer_id = ?", customerID).
 		Order("occurred_at DESC").
 		Scan(ctx)
+	if events == nil {
+		events = make([]*model.MultiCustomerEvent, 0)
+	}
 	return events, err
 }
 
@@ -770,8 +786,8 @@ func (s *Store) CalculateCustomerStatsAndTimeline(
 	activeLicenses := make([]*model.CustomerLicenseItem, 0)
 	licenseHistory := make([]*model.CustomerLicenseItem, 0)
 
-	var currentProducts []string
-	var currentPlans []string
+	currentProducts := make([]string, 0)
+	currentPlans := make([]string, 0)
 	seenProducts := make(map[string]bool)
 	seenPlans := make(map[string]bool)
 
@@ -911,7 +927,7 @@ func (s *Store) CalculateCustomerStatsAndTimeline(
 		}
 	}
 
-	var gaps []model.CustomerProtectionGap
+	gaps := make([]model.CustomerProtectionGap, 0)
 	totalGapDays := 0
 	for i := 0; i < len(mergedCoverage)-1; i++ {
 		gapStart := mergedCoverage[i].end
@@ -944,7 +960,7 @@ func (s *Store) CalculateCustomerStatsAndTimeline(
 	}
 
 	// ─── Build Unified Timeline ───
-	var timeline []*model.CustomerTimelineItem
+	timeline := make([]*model.CustomerTimelineItem, 0)
 
 	// 1. Add all events
 	for _, ev := range events {
@@ -1002,6 +1018,25 @@ func (s *Store) CalculateCustomerStatsAndTimeline(
 	sort.Slice(timeline, func(i, j int) bool {
 		return timeline[i].Date.After(timeline[j].Date)
 	})
+
+	if stats.CurrentProducts == nil {
+		stats.CurrentProducts = make([]string, 0)
+	}
+	if stats.CurrentPlans == nil {
+		stats.CurrentPlans = make([]string, 0)
+	}
+	if stats.Gaps == nil {
+		stats.Gaps = make([]model.CustomerProtectionGap, 0)
+	}
+	if activeLicenses == nil {
+		activeLicenses = make([]*model.CustomerLicenseItem, 0)
+	}
+	if licenseHistory == nil {
+		licenseHistory = make([]*model.CustomerLicenseItem, 0)
+	}
+	if timeline == nil {
+		timeline = make([]*model.CustomerTimelineItem, 0)
+	}
 
 	return stats, activeLicenses, licenseHistory, timeline, nil
 }

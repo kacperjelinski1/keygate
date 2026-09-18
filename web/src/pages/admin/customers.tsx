@@ -104,6 +104,11 @@ export default function CustomersPage() {
     enabled: Boolean(selectedCustomerId),
   })
 
+  const activeLicenses = customerDetail?.active_licenses ?? []
+  const licenseHistory = customerDetail?.license_history ?? []
+  const timeline = customerDetail?.timeline ?? []
+  const stats = customerDetail?.stats
+
   const customers = data?.customers || []
   const total = data?.total || 0
   const totalPages = Math.ceil(total / limit)
@@ -262,7 +267,7 @@ export default function CustomersPage() {
       {selectedCustomerId && (
         <Dialog open={Boolean(selectedCustomerId)} onOpenChange={() => setSelectedCustomerId(null)}>
           <DialogContent className="max-w-4xl max-h-[90vh] overflow-y-auto">
-            {isDetailLoading || !customerDetail ? (
+            {isDetailLoading || !customerDetail || !customerDetail.customer ? (
               <div className="py-16 text-center text-muted-foreground">Ładowanie kartoteki klienta...</div>
             ) : (
               <div className="space-y-6">
@@ -348,7 +353,7 @@ export default function CustomersPage() {
                         <ShieldCheck className="h-3.5 w-3.5 text-primary" />
                         {t("crm.activeLicenses")}
                       </div>
-                      <div className="text-xl font-bold mt-1">{customerDetail.stats.active_licenses_count}</div>
+                      <div className="text-xl font-bold mt-1">{stats?.active_licenses_count ?? 0}</div>
                     </CardContent>
                   </Card>
 
@@ -358,7 +363,7 @@ export default function CustomersPage() {
                         <Clock className="h-3.5 w-3.5 text-blue-500" />
                         {t("crm.activeTime")}
                       </div>
-                      <div className="text-xl font-bold mt-1">{customerDetail.stats.active_days} dni</div>
+                      <div className="text-xl font-bold mt-1">{stats?.active_days ?? 0} dni</div>
                     </CardContent>
                   </Card>
 
@@ -368,7 +373,7 @@ export default function CustomersPage() {
                         <DollarSign className="h-3.5 w-3.5 text-emerald-500" />
                         {t("crm.totalPurchases")}
                       </div>
-                      <div className="text-xl font-bold mt-1">{customerDetail.stats.purchases_count}</div>
+                      <div className="text-xl font-bold mt-1">{stats?.purchases_count ?? 0}</div>
                     </CardContent>
                   </Card>
 
@@ -378,7 +383,7 @@ export default function CustomersPage() {
                         <RefreshCw className="h-3.5 w-3.5 text-purple-500" />
                         {t("crm.renewalsCount")}
                       </div>
-                      <div className="text-xl font-bold mt-1">{customerDetail.stats.renewals_count}</div>
+                      <div className="text-xl font-bold mt-1">{stats?.renewals_count ?? 0}</div>
                     </CardContent>
                   </Card>
 
@@ -389,7 +394,7 @@ export default function CustomersPage() {
                         {t("crm.protectionGaps")}
                       </div>
                       <div className="text-xl font-bold mt-1 text-amber-600 dark:text-amber-400">
-                        {customerDetail.stats.gaps_count} ({customerDetail.stats.gap_days} dni)
+                        {stats?.gaps_count ?? 0} ({stats?.gap_days ?? 0} dni)
                       </div>
                     </CardContent>
                   </Card>
@@ -401,9 +406,7 @@ export default function CustomersPage() {
                         {t("crm.lastPurchase")}
                       </div>
                       <div className="text-sm font-semibold mt-1.5 truncate">
-                        {customerDetail.stats.last_purchase_date
-                          ? formatDate(customerDetail.stats.last_purchase_date)
-                          : "—"}
+                        {stats?.last_purchase_date ? formatDate(stats.last_purchase_date) : "—"}
                       </div>
                     </CardContent>
                   </Card>
@@ -413,24 +416,24 @@ export default function CustomersPage() {
                 <Tabs defaultValue="active_licenses" className="w-full">
                   <TabsList className="grid w-full grid-cols-3">
                     <TabsTrigger value="active_licenses">
-                      {t("crm.currentLicenses")} ({customerDetail.active_licenses.length})
+                      {t("crm.currentLicenses")} ({activeLicenses.length})
                     </TabsTrigger>
                     <TabsTrigger value="history_licenses">
-                      {t("crm.licenseHistory")} ({customerDetail.license_history.length})
+                      {t("crm.licenseHistory")} ({licenseHistory.length})
                     </TabsTrigger>
                     <TabsTrigger value="timeline">
-                      {t("crm.timeline")} ({customerDetail.timeline.length})
+                      {t("crm.timeline")} ({timeline.length})
                     </TabsTrigger>
                   </TabsList>
 
                   {/* Tab 1: Current Licenses */}
                   <TabsContent value="active_licenses" className="mt-4 space-y-4">
-                    {customerDetail.active_licenses.length === 0 ? (
+                    {activeLicenses.length === 0 ? (
                       <div className="p-8 text-center border rounded-lg bg-muted/20 text-muted-foreground">
                         Brak aktywnych licencji dla tego klienta.
                       </div>
                     ) : (
-                      customerDetail.active_licenses.map((lic) => (
+                      activeLicenses.map((lic) => (
                         <Card key={lic.id} className="border-l-4 border-l-primary">
                           <CardHeader className="p-4 pb-2">
                             <div className="flex items-center justify-between">
@@ -504,95 +507,107 @@ export default function CustomersPage() {
 
                   {/* Tab 2: License History */}
                   <TabsContent value="history_licenses" className="mt-4">
-                    <Card>
-                      <CardContent className="p-0">
-                        <DataTable>
-                          <DataTableHeader>
-                            <DataTableRow>
-                              <DataTableHead>Produkt i Plan</DataTableHead>
-                              <DataTableHead>Okres licencji</DataTableHead>
-                              <DataTableHead>Klucz</DataTableHead>
-                              <DataTableHead>Status</DataTableHead>
-                              <DataTableHead>Data przypisania</DataTableHead>
-                            </DataTableRow>
-                          </DataTableHeader>
-                          <DataTableBody>
-                            {customerDetail.license_history.map((lic) => (
-                              <DataTableRow key={lic.id}>
-                                <DataTableCell className="text-xs font-semibold">
-                                  {lic.product?.name} ({lic.plan?.name})
-                                </DataTableCell>
-                                <DataTableCell className="text-xs text-muted-foreground font-mono">
-                                  {formatDate(lic.created_at)} →{" "}
-                                  {lic.valid_until ? formatDate(lic.valid_until) : "Wieczysta"}
-                                </DataTableCell>
-                                <DataTableCell className="text-xs font-mono">
-                                  {lic.license_key_hint || "••••-••••"}
-                                </DataTableCell>
-                                <DataTableCell>
-                                  <Badge variant={statusColor(lic.status) as any} className="capitalize text-xs">
-                                    {lic.status}
-                                  </Badge>
-                                </DataTableCell>
-                                <DataTableCell className="text-xs text-muted-foreground">
-                                  {formatDate(lic.assigned_at)}
-                                </DataTableCell>
+                    {licenseHistory.length === 0 ? (
+                      <div className="p-8 text-center border rounded-lg bg-muted/20 text-muted-foreground">
+                        Brak historii licencji dla tego klienta.
+                      </div>
+                    ) : (
+                      <Card>
+                        <CardContent className="p-0">
+                          <DataTable>
+                            <DataTableHeader>
+                              <DataTableRow>
+                                <DataTableHead>Produkt i Plan</DataTableHead>
+                                <DataTableHead>Okres licencji</DataTableHead>
+                                <DataTableHead>Klucz</DataTableHead>
+                                <DataTableHead>Status</DataTableHead>
+                                <DataTableHead>Data przypisania</DataTableHead>
                               </DataTableRow>
-                            ))}
-                          </DataTableBody>
-                        </DataTable>
-                      </CardContent>
-                    </Card>
+                            </DataTableHeader>
+                            <DataTableBody>
+                              {licenseHistory.map((lic) => (
+                                <DataTableRow key={lic.id}>
+                                  <DataTableCell className="text-xs font-semibold">
+                                    {lic.product?.name || "Multi-Guard"} ({lic.plan?.name || "Standard"})
+                                  </DataTableCell>
+                                  <DataTableCell className="text-xs text-muted-foreground font-mono">
+                                    {formatDate(lic.created_at)} →{" "}
+                                    {lic.valid_until ? formatDate(lic.valid_until) : "Wieczysta"}
+                                  </DataTableCell>
+                                  <DataTableCell className="text-xs font-mono">
+                                    {lic.license_key_hint || "••••-••••"}
+                                  </DataTableCell>
+                                  <DataTableCell>
+                                    <Badge variant={statusColor(lic.status) as any} className="capitalize text-xs">
+                                      {lic.status}
+                                    </Badge>
+                                  </DataTableCell>
+                                  <DataTableCell className="text-xs text-muted-foreground">
+                                    {formatDate(lic.assigned_at)}
+                                  </DataTableCell>
+                                </DataTableRow>
+                              ))}
+                            </DataTableBody>
+                          </DataTable>
+                        </CardContent>
+                      </Card>
+                    )}
                   </TabsContent>
 
                   {/* Tab 3: History & Timeline */}
                   <TabsContent value="timeline" className="mt-4">
-                    <div className="space-y-3">
-                      {customerDetail.timeline.map((item) => (
-                        <div
-                          key={item.id}
-                          className={`p-3.5 rounded-lg border text-sm transition-all ${
-                            item.kind === "gap"
-                              ? "bg-amber-500/10 border-amber-500/30 text-amber-950 dark:text-amber-200"
-                              : "bg-card hover:bg-muted/40"
-                          }`}
-                        >
-                          <div className="flex items-start justify-between gap-4">
-                            <div className="space-y-1">
-                              <div className="flex items-center gap-2">
-                                {item.kind === "gap" ? (
-                                  <AlertCircle className="h-4 w-4 text-amber-500 shrink-0" />
-                                ) : (
-                                  <History className="h-4 w-4 text-primary shrink-0" />
+                    {timeline.length === 0 ? (
+                      <div className="p-8 text-center border rounded-lg bg-muted/20 text-muted-foreground">
+                        Brak zdarzeń w osi czasu klienta.
+                      </div>
+                    ) : (
+                      <div className="space-y-3">
+                        {timeline.map((item) => (
+                          <div
+                            key={item.id}
+                            className={`p-3.5 rounded-lg border text-sm transition-all ${
+                              item.kind === "gap"
+                                ? "bg-amber-500/10 border-amber-500/30 text-amber-950 dark:text-amber-200"
+                                : "bg-card hover:bg-muted/40"
+                            }`}
+                          >
+                            <div className="flex items-start justify-between gap-4">
+                              <div className="space-y-1">
+                                <div className="flex items-center gap-2">
+                                  {item.kind === "gap" ? (
+                                    <AlertCircle className="h-4 w-4 text-amber-500 shrink-0" />
+                                  ) : (
+                                    <History className="h-4 w-4 text-primary shrink-0" />
+                                  )}
+                                  <span className="font-semibold">{item.title}</span>
+                                  {item.amount != null && (
+                                    <Badge variant="outline" className="text-xs font-mono font-semibold">
+                                      {Number(item.amount).toFixed(2)} {item.currency || "PLN"}
+                                    </Badge>
+                                  )}
+                                  {item.payment_method && (
+                                    <Badge variant="secondary" className="text-[11px] capitalize">
+                                      {item.payment_method}
+                                    </Badge>
+                                  )}
+                                </div>
+                                {item.description && (
+                                  <p className="text-xs text-muted-foreground pl-6">{item.description}</p>
                                 )}
-                                <span className="font-semibold">{item.title}</span>
-                                {item.amount && (
-                                  <Badge variant="outline" className="text-xs font-mono font-semibold">
-                                    {item.amount.toFixed(2)} {item.currency}
-                                  </Badge>
-                                )}
-                                {item.payment_method && (
-                                  <Badge variant="secondary" className="text-[11px] capitalize">
-                                    {item.payment_method}
-                                  </Badge>
+                                {item.period_from && item.period_until && (
+                                  <p className="text-[11px] text-muted-foreground pl-6 font-mono">
+                                    Okres: {formatDate(item.period_from)} → {formatDate(item.period_until)}
+                                  </p>
                                 )}
                               </div>
-                              {item.description && (
-                                <p className="text-xs text-muted-foreground pl-6">{item.description}</p>
-                              )}
-                              {item.period_from && item.period_until && (
-                                <p className="text-[11px] text-muted-foreground pl-6 font-mono">
-                                  Okres: {formatDate(item.period_from)} → {formatDate(item.period_until)}
-                                </p>
-                              )}
-                            </div>
-                            <div className="text-xs text-muted-foreground shrink-0 font-mono">
-                              {formatDate(item.date)}
+                              <div className="text-xs text-muted-foreground shrink-0 font-mono">
+                                {formatDate(item.date)}
+                              </div>
                             </div>
                           </div>
-                        </div>
-                      ))}
-                    </div>
+                        ))}
+                      </div>
+                    )}
                   </TabsContent>
                 </Tabs>
               </div>
@@ -895,9 +910,9 @@ function SaleDialog({
                       value={customerSearch}
                       onChange={(e) => setCustomerSearch(e.target.value)}
                     />
-                    {searchResults && searchResults.customers.length > 0 && (
+                    {(searchResults?.customers?.length ?? 0) > 0 && (
                       <div className="absolute z-10 w-full mt-1 bg-popover border rounded-md shadow-lg overflow-hidden">
-                        {searchResults.customers.map((c) => (
+                        {(searchResults?.customers ?? []).map((c) => (
                           <button
                             type="button"
                             key={c.id}
@@ -1156,7 +1171,7 @@ function MergeCustomerDialog({
               <SelectValue placeholder="Wybierz klienta docelowego..." />
             </SelectTrigger>
             <SelectContent>
-              {customers.map((c) => (
+              {(customers ?? []).map((c) => (
                 <SelectItem key={c.id} value={c.id}>
                   {c.first_name} {c.last_name} ({c.phone})
                 </SelectItem>

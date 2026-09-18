@@ -146,6 +146,27 @@ func (h *CRMHandler) GetCustomer(c *gin.Context) {
 		return
 	}
 
+	if activeLics == nil {
+		activeLics = make([]*model.CustomerLicenseItem, 0)
+	}
+	if licHistory == nil {
+		licHistory = make([]*model.CustomerLicenseItem, 0)
+	}
+	if timeline == nil {
+		timeline = make([]*model.CustomerTimelineItem, 0)
+	}
+	if stats != nil {
+		if stats.CurrentProducts == nil {
+			stats.CurrentProducts = make([]string, 0)
+		}
+		if stats.CurrentPlans == nil {
+			stats.CurrentPlans = make([]string, 0)
+		}
+		if stats.Gaps == nil {
+			stats.Gaps = make([]model.CustomerProtectionGap, 0)
+		}
+	}
+
 	response.OK(c, model.CustomerDetailResponse{
 		Customer:       cust,
 		Stats:          stats,

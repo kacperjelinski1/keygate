@@ -652,10 +652,10 @@ export interface CRMTimelineItem {
 
 export interface CRMCustomerDetail {
   customer: CRMCustomer
-  stats: CRMCustomerStats
-  active_licenses: CRMLicenseItem[]
-  license_history: CRMLicenseItem[]
-  timeline: CRMTimelineItem[]
+  stats?: CRMCustomerStats
+  active_licenses?: CRMLicenseItem[]
+  license_history?: CRMLicenseItem[]
+  timeline?: CRMTimelineItem[]
 }
 
 export interface CRMCustomerEvent {

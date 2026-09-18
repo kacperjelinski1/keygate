@@ -3,7 +3,9 @@ package store_test
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -1258,3 +1260,114 @@ func TestCRM_PhoneNormalizationInternational(t *testing.T) {
 		}
 	}
 }
+
+// 30. Regression Test: New customer with zero licenses and events must return empty slices, never null
+func TestCRM_NewCustomerEmptyDetailsDoesNotReturnNullSlices(t *testing.T) {
+	s, cleanup := setupMemoryCRMStore(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	// Create customer without any licenses, purchases, or events
+	cust := &model.MultiCustomer{
+		FirstName: "Nowy",
+		LastName:  "Klient",
+		Phone:     "500 999 888",
+		Email:     "nowy.klient@multi-servis.pl",
+	}
+	err := s.CreateCustomer(ctx, cust)
+	if err != nil {
+		t.Fatalf("CreateCustomer: %v", err)
+	}
+
+	stats, activeLics, licHistory, timeline, err := s.CalculateCustomerStatsAndTimeline(ctx, cust, time.Now())
+	if err != nil {
+		t.Fatalf("CalculateCustomerStatsAndTimeline: %v", err)
+	}
+
+	if stats == nil {
+		t.Fatal("expected non-nil stats")
+	}
+	if activeLics == nil {
+		t.Fatal("expected activeLics to be non-nil empty slice, got nil")
+	}
+	if licHistory == nil {
+		t.Fatal("expected licHistory to be non-nil empty slice, got nil")
+	}
+	if timeline == nil {
+		t.Fatal("expected timeline to be non-nil empty slice, got nil")
+	}
+	if stats.CurrentProducts == nil {
+		t.Fatal("expected stats.CurrentProducts to be non-nil empty slice, got nil")
+	}
+	if stats.CurrentPlans == nil {
+		t.Fatal("expected stats.CurrentPlans to be non-nil empty slice, got nil")
+	}
+	if stats.Gaps == nil {
+		t.Fatal("expected stats.Gaps to be non-nil empty slice, got nil")
+	}
+
+	// Verify JSON serialization produces [] and not null
+	detailResp := model.CustomerDetailResponse{
+		Customer:       cust,
+		Stats:          stats,
+		ActiveLicenses: activeLics,
+		LicenseHistory: licHistory,
+		Timeline:       timeline,
+	}
+
+	data, err := json.Marshal(detailResp)
+	if err != nil {
+		t.Fatalf("json.Marshal detailResp: %v", err)
+	}
+	jsonStr := string(data)
+
+	expectedEmptyArrays := []string{
+		`"timeline":[]`,
+		`"active_licenses":[]`,
+		`"license_history":[]`,
+		`"current_products":[]`,
+		`"current_plans":[]`,
+		`"gaps":[]`,
+	}
+	for _, expected := range expectedEmptyArrays {
+		if !strings.Contains(jsonStr, expected) {
+			t.Errorf("expected JSON to contain %s, but got: %s", expected, jsonStr)
+		}
+	}
+
+	forbiddenNulls := []string{
+		`"timeline":null`,
+		`"active_licenses":null`,
+		`"license_history":null`,
+		`"current_products":null`,
+		`"current_plans":null`,
+		`"gaps":null`,
+	}
+	for _, forbidden := range forbiddenNulls {
+		if strings.Contains(jsonStr, forbidden) {
+			t.Errorf("CRITICAL BUG: JSON contains %s: %s", forbidden, jsonStr)
+		}
+	}
+
+	// Also verify ListCustomers with empty filter or empty result returns non-nil slice
+	custList, total, err := s.ListCustomers(ctx, "nonexistent-query-xyz", false, 0, 10)
+	if err != nil {
+		t.Fatalf("ListCustomers: %v", err)
+	}
+	if custList == nil {
+		t.Fatal("expected custList to be non-nil empty slice, got nil")
+	}
+	if total != 0 {
+		t.Fatalf("expected total 0, got %d", total)
+	}
+
+	// Also verify CheckCustomerDuplicates returns non-nil slices
+	dupRes, err := s.CheckCustomerDuplicates(ctx, "", "+48000000000", "none@example.com")
+	if err != nil {
+		t.Fatalf("CheckCustomerDuplicates: %v", err)
+	}
+	if dupRes.ExactPhoneMatch == nil || dupRes.ExactEmailMatch == nil {
+		t.Fatal("expected non-nil slices in CheckCustomerDuplicates")
+	}
+}
+
