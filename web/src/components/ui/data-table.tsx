@@ -238,6 +238,59 @@ function useClientPagination<T>(items: T[], defaultPageSize = 20) {
   }
 }
 
+// ─── Server-side pagination hook ───
+
+// The same shape useClientPagination returns, so a page that outgrows
+// client-side paging swaps the hook and leaves its table, its pager and
+// its JSX alone. `items` stands where `paginatedItems` stood; `params`
+// goes straight into the request.
+//
+// totalPages is worked out from the limit the *server* says it applied,
+// not the one we asked for: a request for 1000 rows is served 200, and
+// a pager built on the asking number would be five times too short.
+function useServerPagination(defaultPageSize = 20, filters?: unknown) {
+  const [page, setPage] = React.useState(0)
+  const [pageSize, setPageSize] = React.useState(defaultPageSize)
+
+  // Changing a filter starts again at the first page. Staying on page
+  // 5 of a list that a new search has cut to one page shows an empty
+  // table under a pager that says there is nothing to page through.
+  // Adjusted while rendering rather than in an effect: the table is
+  // then drawn once, with the right page, instead of drawing the empty
+  // one first and correcting it.
+  const filterKey = JSON.stringify(filters ?? null)
+  const [lastFilterKey, setLastFilterKey] = React.useState(filterKey)
+  if (filterKey !== lastFilterKey) {
+    setLastFilterKey(filterKey)
+    setPage(0)
+  }
+
+  return {
+    page,
+    setPage,
+    pageSize,
+    setPageSize: (size: number) => {
+      setPageSize(size)
+      setPage(0)
+    },
+    params: { limit: pageSize, offset: page * pageSize },
+    // Reads one list response.
+    //
+    // A page that has fallen off the end — the rows on it were deleted
+    // while it was open — steps back to the last page there is, the
+    // same recovery the client-side hook does. Without it the table
+    // sits empty under a pager whose highest page number is lower than
+    // the page being shown.
+    from<T>(data: { total?: number; limit?: number } | undefined, items: T[] | undefined) {
+      const total = data?.total ?? 0
+      const limit = data?.limit || pageSize
+      const totalPages = Math.max(1, Math.ceil(total / limit))
+      if (data && page > 0 && page >= totalPages) setPage(totalPages - 1)
+      return { items: items ?? [], total, totalPages }
+    },
+  }
+}
+
 export {
   DataTable,
   DataTableBody,
@@ -248,4 +301,5 @@ export {
   DataTablePagination,
   DataTableRow,
   useClientPagination,
+  useServerPagination,
 }

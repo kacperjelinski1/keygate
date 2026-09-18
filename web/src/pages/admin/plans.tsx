@@ -2,6 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { Copy, Package, Pencil, Plus, Trash2 } from "lucide-react"
 import { useEffect, useState } from "react"
 import { Link } from "react-router-dom"
+import { ProductSelect } from "@/components/product-select"
 import { showToast } from "@/components/toast"
 import {
   AlertDialog,
@@ -24,9 +25,17 @@ import {
   DataTableHeader,
   DataTablePagination,
   DataTableRow,
-  useClientPagination,
+  useServerPagination,
 } from "@/components/ui/data-table"
-import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog"
+import {
+  Dialog,
+  DialogBody,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
@@ -40,18 +49,24 @@ export default function PlansPage() {
   const qc = useQueryClient()
   const [productFilter, setProductFilter] = useState<string>("")
   const [search, setSearch] = useState("")
-  const { data: productsData } = useQuery({ queryKey: ["admin", "products"], queryFn: () => admin.listProducts() })
+  const pg = useServerPagination(10, [productFilter, search])
+  const { data: productsData } = useQuery({
+    // One row is all this page needs from the catalogue: whether the
+    // install has any product at all, and which one a new form starts
+    // on. The pickers fetch their own candidates, with search.
+    queryKey: ["admin", "products", "newest"],
+    queryFn: () => admin.listProducts({ limit: 1 }),
+  })
   const { data, isLoading } = useQuery({
-    queryKey: ["admin", "plans", productFilter, search],
-    queryFn: () => admin.listPlans(productFilter || undefined, search || undefined),
+    queryKey: ["admin", "plans", productFilter, search, pg.page, pg.pageSize],
+    queryFn: () => admin.listPlans({ product_id: productFilter, search, ...pg.params }),
   })
   const [creating, setCreating] = useState(false)
   const [editing, setEditing] = useState<Plan | null>(null)
   const [deleting, setDeleting] = useState<Plan | null>(null)
 
   const products = productsData?.products || []
-  const plans = data?.plans || []
-  const { page, setPage, pageSize, setPageSize, total, totalPages, paginatedItems } = useClientPagination(plans, 10)
+  const { items: plans, total, totalPages } = pg.from(data, data?.plans)
 
   const createMut = useMutation({
     mutationFn: admin.createPlan,
@@ -122,19 +137,9 @@ export default function PlansPage() {
           onChange={(e) => setSearch(e.target.value)}
           className="w-64"
         />
-        <Select value={productFilter} onValueChange={setProductFilter}>
-          <SelectTrigger className="w-48">
-            <SelectValue placeholder={t("plans.allProducts")} />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="all">{t("plans.allProducts")}</SelectItem>
-            {products.map((p) => (
-              <SelectItem key={p.id} value={p.id}>
-                {p.name}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
+        {/* "all" maps back to no filter here: it used to be sent as a
+            product_id of its own, which matched nothing. */}
+        <ProductSelect value={productFilter} onChange={setProductFilter} allLabel={t("plans.allProducts")} />
       </div>
 
       <Card>
@@ -158,15 +163,15 @@ export default function PlansPage() {
                 </DataTableHeader>
                 <DataTableBody>
                   {plans.length === 0 && <DataTableEmpty colSpan={8} message={t("plans.empty")} />}
-                  {paginatedItems.map((p) => {
-                    const prodType = products.find((pr) => pr.id === p.product_id)?.type
+                  {plans.map((p) => {
+                    const prodType = p.product?.type
                     const supportsActivations = prodType === "desktop" || prodType === "hybrid"
                     const supportsSeats = prodType === "saas" || prodType === "hybrid"
                     return (
                       <DataTableRow key={p.id}>
                         <DataTableCell className="font-medium">{p.name}</DataTableCell>
                         <DataTableCell className="text-muted-foreground">
-                          {products.find((pr) => pr.id === p.product_id)?.name || p.product_id}
+                          {p.product?.name || p.product_id}
                         </DataTableCell>
                         <DataTableCell>
                           <Badge variant="secondary">{p.license_type}</Badge>
@@ -228,12 +233,12 @@ export default function PlansPage() {
               </DataTable>
               {total > 0 && (
                 <DataTablePagination
-                  page={page}
+                  page={pg.page}
                   totalPages={totalPages}
                   total={total}
-                  pageSize={pageSize}
-                  onPageChange={setPage}
-                  onPageSizeChange={setPageSize}
+                  pageSize={pg.pageSize}
+                  onPageChange={pg.setPage}
+                  onPageSizeChange={pg.setPageSize}
                 />
               )}
             </>
@@ -346,7 +351,18 @@ function PlanDialog({
   // Capability map keyed by the currently-selected product's type.
   // Mirrors backend model.ProductSupports — DO NOT diverge or admins
   // will see fields the server then rejects on submit.
-  const selectedProduct = products.find((p) => p.id === form.product_id)
+  // The plan's own product when editing (it may be outside the page
+  // the picker offers), the picked one when creating.
+  // Read the product by id rather than looking it up in whatever page
+  // the picker happens to hold: a product found by search is not on
+  // that page, and falling back to "hybrid" offered fields the server
+  // then refused with INCOMPATIBLE_PRODUCT_TYPE.
+  const { data: pickedProduct } = useQuery({
+    queryKey: ["admin", "product", form.product_id],
+    queryFn: () => admin.getProduct(form.product_id),
+    enabled: !!form.product_id && !plan?.product,
+  })
+  const selectedProduct = plan?.product || pickedProduct
   const productType = selectedProduct?.type || "hybrid"
   const supports = {
     activations: productType === "desktop" || productType === "hybrid",
@@ -373,7 +389,7 @@ function PlanDialog({
 
   return (
     <Dialog open={open} onOpenChange={onClose}>
-      <DialogContent className="max-w-lg max-h-[85vh] overflow-y-auto">
+      <DialogContent className="max-w-lg">
         <DialogHeader>
           <DialogTitle>{title}</DialogTitle>
           <DialogDescription>{t("plans.formDesc")}</DialogDescription>
@@ -383,228 +399,225 @@ function PlanDialog({
             e.preventDefault()
             handleSubmit()
           }}
-          className="space-y-4"
+          className="flex min-h-0 flex-1 flex-col gap-4"
         >
-          <div className="grid grid-cols-2 gap-4">
-            <div className="space-y-2 col-span-2">
-              <Label>{t("common.product")}</Label>
+          <DialogBody className="space-y-4">
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-2 col-span-2">
+                <Label>{t("common.product")}</Label>
 
-              {/* A plan cannot move to another product — its licences
+                {/* A plan cannot move to another product — its licences
                   and entitlements belong to this one, and the update
                   endpoint takes no product_id. */}
-              <Select value={form.product_id} onValueChange={(v) => set("product_id", v)} disabled={!!plan}>
-                <SelectTrigger>
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  {products.map((p) => (
-                    <SelectItem key={p.id} value={p.id}>
-                      {p.name}
-                      {p.type ? <span className="ml-2 text-xs text-muted-foreground">[{p.type}]</span> : null}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-              {/* Capability hint — what this product type allows on plans */}
-              <p className="text-xs text-muted-foreground">
-                {productType === "desktop" && t("plans.hintDesktop")}
-                {productType === "saas" && t("plans.hintSaas")}
-                {productType === "hybrid" && t("plans.hintHybrid")}
-              </p>
-            </div>
-            <div className="space-y-2">
-              <Label>{t("common.name")}</Label>
-              <Input
-                value={form.name}
-                onChange={(e) => {
-                  set("name", e.target.value)
-                  if (!plan) set("slug", e.target.value.toLowerCase().replace(/[^a-z0-9]+/g, "-"))
-                }}
-                required
-              />
-            </div>
-            <div className="space-y-2">
-              <Label>{t("products.slug")}</Label>
-              <Input value={form.slug} onChange={(e) => set("slug", e.target.value)} required />
-            </div>
-            <div className="space-y-2">
-              <Label>{t("plans.licenseType")}</Label>
-              <Select value={form.license_type} onValueChange={setLicenseType}>
-                <SelectTrigger>
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="subscription">{t("plans.subscription")}</SelectItem>
-                  <SelectItem value="perpetual">{t("plans.perpetual")}</SelectItem>
-                  <SelectItem value="trial">{t("plans.trial")}</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-            <div className="space-y-2">
-              <Label>{t("plans.billingInterval")}</Label>
-              <Select
-                value={form.billing_interval || "none"}
-                onValueChange={(v) => set("billing_interval", v === "none" ? "" : v)}
-                disabled={isPerpetual}
-              >
-                <SelectTrigger>
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="none">{t("plans.none")}</SelectItem>
-                  <SelectItem value="month">{t("plans.monthly")}</SelectItem>
-                  <SelectItem value="year">{t("plans.yearly")}</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-            {supports.activations && (
+                <ProductSelect
+                  value={form.product_id}
+                  onChange={(v) => set("product_id", v)}
+                  current={plan?.product}
+                  className="w-full"
+                  disabled={!!plan}
+                  withType
+                />
+                {/* Capability hint — what this product type allows on plans */}
+                <p className="text-xs text-muted-foreground">
+                  {productType === "desktop" && t("plans.hintDesktop")}
+                  {productType === "saas" && t("plans.hintSaas")}
+                  {productType === "hybrid" && t("plans.hintHybrid")}
+                </p>
+              </div>
               <div className="space-y-2">
-                <Label>{t("plans.maxActivations")}</Label>
+                <Label>{t("common.name")}</Label>
                 <Input
-                  type="number"
-                  min={1}
-                  max={10000}
-                  value={form.max_activations}
-                  onChange={(e) => set("max_activations", Number(e.target.value))}
+                  value={form.name}
+                  onChange={(e) => {
+                    set("name", e.target.value)
+                    if (!plan) set("slug", e.target.value.toLowerCase().replace(/[^a-z0-9]+/g, "-"))
+                  }}
+                  required
                 />
               </div>
-            )}
-            {supports.seats && (
               <div className="space-y-2">
-                <Label>{t("plans.maxSeats")}</Label>
-                <Input
-                  type="number"
-                  min={0}
-                  max={100000}
-                  value={form.max_seats}
-                  onChange={(e) => set("max_seats", Number(e.target.value))}
-                />
-                <p className="text-xs text-muted-foreground">{t("plans.maxSeatsHint")}</p>
+                <Label>{t("products.slug")}</Label>
+                <Input value={form.slug} onChange={(e) => set("slug", e.target.value)} required />
               </div>
-            )}
-            {supports.activations && (
               <div className="space-y-2">
-                <Label>{t("plans.licenseModel")}</Label>
-                <Select value={form.license_model} onValueChange={(v) => set("license_model", v)}>
+                <Label>{t("plans.licenseType")}</Label>
+                <Select value={form.license_type} onValueChange={setLicenseType}>
                   <SelectTrigger>
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="standard">{t("plans.modelStandard")}</SelectItem>
-                    <SelectItem value="floating">{t("plans.modelFloating")}</SelectItem>
+                    <SelectItem value="subscription">{t("plans.subscription")}</SelectItem>
+                    <SelectItem value="perpetual">{t("plans.perpetual")}</SelectItem>
+                    <SelectItem value="trial">{t("plans.trial")}</SelectItem>
                   </SelectContent>
                 </Select>
               </div>
-            )}
-            {supports.activations && form.license_model === "floating" && (
               <div className="space-y-2">
-                <Label>{t("plans.floatingTimeout")}</Label>
-                <Input
-                  type="number"
-                  min={1}
-                  max={1440}
-                  value={form.floating_timeout}
-                  onChange={(e) => set("floating_timeout", Number(e.target.value))}
-                />
+                <Label>{t("plans.billingInterval")}</Label>
+                <Select
+                  value={form.billing_interval || "none"}
+                  onValueChange={(v) => set("billing_interval", v === "none" ? "" : v)}
+                  disabled={isPerpetual}
+                >
+                  <SelectTrigger>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="none">{t("plans.none")}</SelectItem>
+                    <SelectItem value="month">{t("plans.monthly")}</SelectItem>
+                    <SelectItem value="year">{t("plans.yearly")}</SelectItem>
+                  </SelectContent>
+                </Select>
               </div>
-            )}
-            {supports.activations && (
+              {supports.activations && (
+                <div className="space-y-2">
+                  <Label>{t("plans.maxActivations")}</Label>
+                  <Input
+                    type="number"
+                    min={1}
+                    max={10000}
+                    value={form.max_activations}
+                    onChange={(e) => set("max_activations", Number(e.target.value))}
+                  />
+                </div>
+              )}
+              {supports.seats && (
+                <div className="space-y-2">
+                  <Label>{t("plans.maxSeats")}</Label>
+                  <Input
+                    type="number"
+                    min={0}
+                    max={100000}
+                    value={form.max_seats}
+                    onChange={(e) => set("max_seats", Number(e.target.value))}
+                  />
+                  <p className="text-xs text-muted-foreground">{t("plans.maxSeatsHint")}</p>
+                </div>
+              )}
+              {supports.activations && (
+                <div className="space-y-2">
+                  <Label>{t("plans.licenseModel")}</Label>
+                  <Select value={form.license_model} onValueChange={(v) => set("license_model", v)}>
+                    <SelectTrigger>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="standard">{t("plans.modelStandard")}</SelectItem>
+                      <SelectItem value="floating">{t("plans.modelFloating")}</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+              )}
+              {supports.activations && form.license_model === "floating" && (
+                <div className="space-y-2">
+                  <Label>{t("plans.floatingTimeout")}</Label>
+                  <Input
+                    type="number"
+                    min={1}
+                    max={1440}
+                    value={form.floating_timeout}
+                    onChange={(e) => set("floating_timeout", Number(e.target.value))}
+                  />
+                </div>
+              )}
+              {supports.activations && (
+                <div className="space-y-2">
+                  <Label>{t("plans.tokenTtlDays")}</Label>
+                  <Input
+                    type="number"
+                    min={0}
+                    max={365}
+                    value={form.token_ttl_days}
+                    onChange={(e) => set("token_ttl_days", Number(e.target.value))}
+                  />
+                  <p className="text-xs text-muted-foreground">{t("plans.tokenTtlDaysHint")}</p>
+                </div>
+              )}
               <div className="space-y-2">
-                <Label>{t("plans.tokenTtlDays")}</Label>
+                <Label>{t("plans.trialDays")}</Label>
                 <Input
                   type="number"
                   min={0}
                   max={365}
-                  value={form.token_ttl_days}
-                  onChange={(e) => set("token_ttl_days", Number(e.target.value))}
+                  value={form.trial_days}
+                  onChange={(e) => set("trial_days", Number(e.target.value))}
                 />
-                <p className="text-xs text-muted-foreground">{t("plans.tokenTtlDaysHint")}</p>
               </div>
-            )}
-            <div className="space-y-2">
-              <Label>{t("plans.trialDays")}</Label>
-              <Input
-                type="number"
-                min={0}
-                max={365}
-                value={form.trial_days}
-                onChange={(e) => set("trial_days", Number(e.target.value))}
-              />
-            </div>
-            <div className="space-y-2">
-              <Label>{t("plans.graceDays")}</Label>
-              <Input
-                type="number"
-                min={0}
-                max={365}
-                value={form.grace_days}
-                onChange={(e) => set("grace_days", Number(e.target.value))}
-              />
-            </div>
-            <div className="space-y-2 flex items-center gap-3 pt-5">
-              <input
-                type="checkbox"
-                checked={form.active}
-                onChange={(e) => set("active", e.target.checked)}
-                className="h-4 w-4 rounded border-input accent-primary"
-                id="plan-active"
-              />
-              <Label htmlFor="plan-active">{t("common.active")}</Label>
-            </div>
-            <div className="space-y-2">
-              <Label>{t("plans.stripePriceId")}</Label>
-              <Input
-                value={form.stripe_price_id}
-                onChange={(e) => set("stripe_price_id", e.target.value)}
-                placeholder="price_..."
-              />
-            </div>
-            {/* Maintenance period: the license never expires, but only
+              <div className="space-y-2">
+                <Label>{t("plans.graceDays")}</Label>
+                <Input
+                  type="number"
+                  min={0}
+                  max={365}
+                  value={form.grace_days}
+                  onChange={(e) => set("grace_days", Number(e.target.value))}
+                />
+              </div>
+              <div className="space-y-2 flex items-center gap-3 pt-5">
+                <input
+                  type="checkbox"
+                  checked={form.active}
+                  onChange={(e) => set("active", e.target.checked)}
+                  className="h-4 w-4 rounded border-input accent-primary"
+                  id="plan-active"
+                />
+                <Label htmlFor="plan-active">{t("common.active")}</Label>
+              </div>
+              <div className="space-y-2">
+                <Label>{t("plans.stripePriceId")}</Label>
+                <Input
+                  value={form.stripe_price_id}
+                  onChange={(e) => set("stripe_price_id", e.target.value)}
+                  placeholder="price_..."
+                />
+              </div>
+              {/* Maintenance period: the license never expires, but only
                 releases published before updates_until can be installed.
                 The server clears these on non-perpetual plans. */}
-            {isPerpetual && (
-              <>
-                <div className="space-y-2">
-                  <Label>{t("plans.updatesDays")}</Label>
-                  <Input
-                    type="number"
-                    min={0}
-                    max={3650}
-                    value={form.updates_days}
-                    onChange={(e) => set("updates_days", Number(e.target.value))}
-                  />
-                  <p className="text-xs text-muted-foreground">{t("plans.updatesDaysHint")}</p>
-                </div>
-                <div className="space-y-2">
-                  <Label>{t("plans.renewalDays")}</Label>
-                  <Input
-                    type="number"
-                    min={0}
-                    max={3650}
-                    value={form.renewal_days}
-                    onChange={(e) => set("renewal_days", Number(e.target.value))}
-                  />
-                </div>
-                <div className="space-y-2">
-                  <Label>{t("plans.stripeRenewalPriceId")}</Label>
-                  <Input
-                    value={form.stripe_renewal_price_id}
-                    onChange={(e) => set("stripe_renewal_price_id", e.target.value)}
-                    placeholder="price_..."
-                  />
-                  <p className="text-xs text-muted-foreground">{t("plans.renewalHint")}</p>
-                </div>
-              </>
-            )}
-          </div>
-          <div className="flex justify-end gap-2 pt-2">
+              {isPerpetual && (
+                <>
+                  <div className="space-y-2">
+                    <Label>{t("plans.updatesDays")}</Label>
+                    <Input
+                      type="number"
+                      min={0}
+                      max={3650}
+                      value={form.updates_days}
+                      onChange={(e) => set("updates_days", Number(e.target.value))}
+                    />
+                    <p className="text-xs text-muted-foreground">{t("plans.updatesDaysHint")}</p>
+                  </div>
+                  <div className="space-y-2">
+                    <Label>{t("plans.renewalDays")}</Label>
+                    <Input
+                      type="number"
+                      min={0}
+                      max={3650}
+                      value={form.renewal_days}
+                      onChange={(e) => set("renewal_days", Number(e.target.value))}
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label>{t("plans.stripeRenewalPriceId")}</Label>
+                    <Input
+                      value={form.stripe_renewal_price_id}
+                      onChange={(e) => set("stripe_renewal_price_id", e.target.value)}
+                      placeholder="price_..."
+                    />
+                    <p className="text-xs text-muted-foreground">{t("plans.renewalHint")}</p>
+                  </div>
+                </>
+              )}
+            </div>
+          </DialogBody>
+          <DialogFooter>
             <Button type="button" variant="outline" onClick={onClose}>
               {t("common.cancel")}
             </Button>
             <Button type="submit" disabled={loading}>
               {loading ? t("common.loading") : t("common.save")}
             </Button>
-          </div>
+          </DialogFooter>
         </form>
 
         {/* Entitlements section (only when editing) */}

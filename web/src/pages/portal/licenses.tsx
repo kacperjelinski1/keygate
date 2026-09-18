@@ -14,7 +14,7 @@ import {
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
-import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog"
+import { Dialog, DialogBody, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
@@ -650,46 +650,47 @@ function InviteSeatDialog({ license, onClose }: { license: PortalLicense; onClos
           <DialogTitle>{t("licenses.inviteTitle")}</DialogTitle>
           <DialogDescription>{t("licenses.inviteDesc")}</DialogDescription>
         </DialogHeader>
+        <DialogBody>
+          <div className="space-y-4">
+            <div className="space-y-2">
+              <Label htmlFor="invite-email">{t("common.email")}</Label>
+              <Input
+                id="invite-email"
+                type="email"
+                autoComplete="off"
+                autoFocus
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                placeholder="teammate@example.com"
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && canSubmit) inviteMut.mutate()
+                }}
+              />
+            </div>
 
-        <div className="space-y-4">
-          <div className="space-y-2">
-            <Label htmlFor="invite-email">{t("common.email")}</Label>
-            <Input
-              id="invite-email"
-              type="email"
-              autoComplete="off"
-              autoFocus
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              placeholder="teammate@example.com"
-              onKeyDown={(e) => {
-                if (e.key === "Enter" && canSubmit) inviteMut.mutate()
-              }}
-            />
-          </div>
+            <div className="space-y-2">
+              <Label htmlFor="invite-role">{t("team.role")}</Label>
+              <Select value={role} onValueChange={(v) => setRole(v as "member" | "admin")}>
+                <SelectTrigger id="invite-role">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="member">{t("portal.roleMember")}</SelectItem>
+                  <SelectItem value="admin">{t("portal.roleAdmin")}</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
 
-          <div className="space-y-2">
-            <Label htmlFor="invite-role">{t("team.role")}</Label>
-            <Select value={role} onValueChange={(v) => setRole(v as "member" | "admin")}>
-              <SelectTrigger id="invite-role">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="member">{t("portal.roleMember")}</SelectItem>
-                <SelectItem value="admin">{t("portal.roleAdmin")}</SelectItem>
-              </SelectContent>
-            </Select>
+            <div className="flex justify-end gap-2">
+              <Button variant="outline" onClick={onClose}>
+                {t("common.cancel")}
+              </Button>
+              <Button disabled={!canSubmit} onClick={() => inviteMut.mutate()}>
+                {t("licenses.sendInvite")}
+              </Button>
+            </div>
           </div>
-
-          <div className="flex justify-end gap-2">
-            <Button variant="outline" onClick={onClose}>
-              {t("common.cancel")}
-            </Button>
-            <Button disabled={!canSubmit} onClick={() => inviteMut.mutate()}>
-              {t("licenses.sendInvite")}
-            </Button>
-          </div>
-        </div>
+        </DialogBody>
       </DialogContent>
     </Dialog>
   )
@@ -792,30 +793,32 @@ function CancelDialog({
           <DialogTitle>{t("portal.cancelSubscription")}</DialogTitle>
           <DialogDescription>{t("portal.cancelDesc", { product: productName })}</DialogDescription>
         </DialogHeader>
-        <div className="space-y-4">
-          {provider === "stripe" && (
-            <label className="flex items-center gap-2 text-sm">
-              <input
-                type="checkbox"
-                checked={immediate}
-                onChange={(e) => setImmediate(e.target.checked)}
-                className="rounded"
-              />
-              {t("portal.cancelImmediately")}
-            </label>
-          )}
-          <p className="text-sm text-muted-foreground">
-            {immediate ? t("portal.cancelImmediateWarning") : t("portal.cancelEndWarning")}
-          </p>
-          <div className="flex justify-end gap-2">
-            <Button variant="outline" onClick={onClose}>
-              {t("common.cancel")}
-            </Button>
-            <Button variant="destructive" onClick={() => cancelMut.mutate()} disabled={cancelMut.isPending}>
-              {cancelMut.isPending ? t("common.loading") : t("portal.confirmCancel")}
-            </Button>
+        <DialogBody>
+          <div className="space-y-4">
+            {provider === "stripe" && (
+              <label className="flex items-center gap-2 text-sm">
+                <input
+                  type="checkbox"
+                  checked={immediate}
+                  onChange={(e) => setImmediate(e.target.checked)}
+                  className="rounded"
+                />
+                {t("portal.cancelImmediately")}
+              </label>
+            )}
+            <p className="text-sm text-muted-foreground">
+              {immediate ? t("portal.cancelImmediateWarning") : t("portal.cancelEndWarning")}
+            </p>
+            <div className="flex justify-end gap-2">
+              <Button variant="outline" onClick={onClose}>
+                {t("common.cancel")}
+              </Button>
+              <Button variant="destructive" onClick={() => cancelMut.mutate()} disabled={cancelMut.isPending}>
+                {cancelMut.isPending ? t("common.loading") : t("portal.confirmCancel")}
+              </Button>
+            </div>
           </div>
-        </div>
+        </DialogBody>
       </DialogContent>
     </Dialog>
   )
@@ -831,45 +834,50 @@ function InvoicesDialog({ licenseId, onClose }: { licenseId: string; onClose: ()
 
   return (
     <Dialog open onOpenChange={onClose}>
-      <DialogContent className="max-w-2xl max-h-[85vh] overflow-y-auto">
+      <DialogContent className="max-w-2xl">
         <DialogHeader>
           <DialogTitle>{t("portal.invoices")}</DialogTitle>
         </DialogHeader>
-        {isLoading ? (
-          <div className="h-32 animate-pulse bg-muted rounded-lg" />
-        ) : invoices.length === 0 ? (
-          <p className="text-sm text-muted-foreground text-center py-8">{t("common.noData")}</p>
-        ) : (
-          <div className="space-y-2">
-            {invoices.map((inv: any) => (
-              <div key={inv.id} className="flex items-center justify-between bg-muted/50 rounded-lg px-4 py-3 text-sm">
-                <div>
-                  <p className="font-medium">{inv.number || inv.id}</p>
-                  <p className="text-xs text-muted-foreground">{new Date(inv.created * 1000).toLocaleDateString()}</p>
+        <DialogBody>
+          {isLoading ? (
+            <div className="h-32 animate-pulse bg-muted rounded-lg" />
+          ) : invoices.length === 0 ? (
+            <p className="text-sm text-muted-foreground text-center py-8">{t("common.noData")}</p>
+          ) : (
+            <div className="space-y-2">
+              {invoices.map((inv: any) => (
+                <div
+                  key={inv.id}
+                  className="flex items-center justify-between bg-muted/50 rounded-lg px-4 py-3 text-sm"
+                >
+                  <div>
+                    <p className="font-medium">{inv.number || inv.id}</p>
+                    <p className="text-xs text-muted-foreground">{new Date(inv.created * 1000).toLocaleDateString()}</p>
+                  </div>
+                  <div className="flex items-center gap-3">
+                    <Badge
+                      className={
+                        inv.status === "paid" ? "bg-emerald-100 text-emerald-800" : "bg-amber-100 text-amber-800"
+                      }
+                    >
+                      {inv.status}
+                    </Badge>
+                    <span className="font-medium">
+                      {(inv.amount_paid / 100).toFixed(2)} {inv.currency?.toUpperCase()}
+                    </span>
+                    {inv.invoice_pdf && (
+                      <Button variant="ghost" size="sm" asChild>
+                        <a href={inv.invoice_pdf} target="_blank" rel="noopener noreferrer">
+                          PDF
+                        </a>
+                      </Button>
+                    )}
+                  </div>
                 </div>
-                <div className="flex items-center gap-3">
-                  <Badge
-                    className={
-                      inv.status === "paid" ? "bg-emerald-100 text-emerald-800" : "bg-amber-100 text-amber-800"
-                    }
-                  >
-                    {inv.status}
-                  </Badge>
-                  <span className="font-medium">
-                    {(inv.amount_paid / 100).toFixed(2)} {inv.currency?.toUpperCase()}
-                  </span>
-                  {inv.invoice_pdf && (
-                    <Button variant="ghost" size="sm" asChild>
-                      <a href={inv.invoice_pdf} target="_blank" rel="noopener noreferrer">
-                        PDF
-                      </a>
-                    </Button>
-                  )}
-                </div>
-              </div>
-            ))}
-          </div>
-        )}
+              ))}
+            </div>
+          )}
+        </DialogBody>
       </DialogContent>
     </Dialog>
   )
@@ -907,30 +915,32 @@ function ChangePlanDialog({ license, onClose }: { license: PortalLicense; onClos
           <DialogTitle>{t("portal.changePlan")}</DialogTitle>
           <DialogDescription>{t("portal.changePlanDesc")}</DialogDescription>
         </DialogHeader>
-        {plans.length === 0 ? (
-          <p className="text-sm text-muted-foreground text-center py-4">{t("portal.noOtherPlans")}</p>
-        ) : (
-          <div className="space-y-2">
-            {plans.map((plan: any) => (
-              <div key={plan.id} className="flex items-center justify-between bg-muted/50 rounded-lg px-4 py-3">
-                <div>
-                  <p className="font-medium text-sm">{plan.name}</p>
-                  <p className="text-xs text-muted-foreground">
-                    {plan.license_type}
-                    {plan.billing_interval ? ` · ${plan.billing_interval}` : ""}
-                  </p>
+        <DialogBody>
+          {plans.length === 0 ? (
+            <p className="text-sm text-muted-foreground text-center py-4">{t("portal.noOtherPlans")}</p>
+          ) : (
+            <div className="space-y-2">
+              {plans.map((plan: any) => (
+                <div key={plan.id} className="flex items-center justify-between bg-muted/50 rounded-lg px-4 py-3">
+                  <div>
+                    <p className="font-medium text-sm">{plan.name}</p>
+                    <p className="text-xs text-muted-foreground">
+                      {plan.license_type}
+                      {plan.billing_interval ? ` · ${plan.billing_interval}` : ""}
+                    </p>
+                  </div>
+                  <Button
+                    size="sm"
+                    onClick={() => changeMut.mutate(plan.stripe_price_id || "")}
+                    disabled={changeMut.isPending}
+                  >
+                    {changeMut.isPending ? t("common.loading") : t("portal.switchTo")}
+                  </Button>
                 </div>
-                <Button
-                  size="sm"
-                  onClick={() => changeMut.mutate(plan.stripe_price_id || "")}
-                  disabled={changeMut.isPending}
-                >
-                  {changeMut.isPending ? t("common.loading") : t("portal.switchTo")}
-                </Button>
-              </div>
-            ))}
-          </div>
-        )}
+              ))}
+            </div>
+          )}
+        </DialogBody>
       </DialogContent>
     </Dialog>
   )

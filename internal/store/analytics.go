@@ -461,7 +461,7 @@ func (s *Store) TakeSnapshot(ctx context.Context, productID string, date time.Ti
 }
 
 func (s *Store) TakeAllSnapshots(ctx context.Context, date time.Time) error {
-	products, err := s.ListProducts(ctx, "")
+	products, _, err := s.ListProducts(ctx, "", nil, All)
 	if err != nil {
 		return err
 	}

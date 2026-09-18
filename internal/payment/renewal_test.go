@@ -16,6 +16,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/tabloy/keygate/internal/model"
 	"github.com/tabloy/keygate/internal/store"
+	"github.com/tabloy/keygate/internal/testsupport"
 )
 
 // aboutDays reports whether a period ends roughly that many days out.
@@ -244,6 +245,7 @@ func TestRenewal_WebhookEventApplies(t *testing.T) {
 // the days bought.
 func TestRenewUpdates_Endpoint(t *testing.T) {
 	s, ctx := openStore(t)
+	testsupport.LockSettings(t, s.DB)
 	defer s.Close()
 	gin.SetMode(gin.TestMode)
 	plan := seedMaintenancePlan(t, s, ctx, "rep")
@@ -748,6 +750,7 @@ func TestRenewal_RefundAfterEditOnRevivedPeriod(t *testing.T) {
 // enforce the cutoff it would grant.
 func TestCheckoutByPlan_BoundedPlanNeedsTheSwitch(t *testing.T) {
 	s, ctx := openStore(t)
+	testsupport.LockSettings(t, s.DB)
 	defer s.Close()
 	gin.SetMode(gin.TestMode)
 	plan := seedMaintenancePlan(t, s, ctx, "sell")
@@ -1091,6 +1094,7 @@ func TestRenewal_SuspendedLicenseIsNotExtended(t *testing.T) {
 // waits for the operator.
 func TestFulfillCheckout_SwitchOffLeavesABoundedSalePending(t *testing.T) {
 	s, ctx := openStore(t)
+	testsupport.LockSettings(t, s.DB)
 	defer s.Close()
 	plan := seedMaintenancePlan(t, s, ctx, "swoff")
 	h := &StripeHandler{Store: s}

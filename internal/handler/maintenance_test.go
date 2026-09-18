@@ -15,6 +15,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/tabloy/keygate/internal/model"
 	"github.com/tabloy/keygate/internal/store"
+	"github.com/tabloy/keygate/internal/testsupport"
 )
 
 func TestNormalizeMaintenance(t *testing.T) {
@@ -63,6 +64,7 @@ func TestUpdatePlan_MaintenanceGate(t *testing.T) {
 	if err := s.RunMigrations("../../db/migrations"); err != nil {
 		t.Fatalf("migrations: %v", err)
 	}
+	testsupport.LockSettings(t, s.DB)
 	ctx := context.Background()
 	gin.SetMode(gin.TestMode)
 	suffix := time.Now().Format("150405.000")
@@ -271,6 +273,7 @@ func TestLicenseIssuance_MaintenanceGate(t *testing.T) {
 	if err := s.RunMigrations("../../db/migrations"); err != nil {
 		t.Fatalf("migrations: %v", err)
 	}
+	testsupport.LockSettings(t, s.DB)
 	ctx := context.Background()
 	gin.SetMode(gin.TestMode)
 	suffix := time.Now().Format("150405.000")
@@ -377,6 +380,7 @@ func TestUpdateProduct_RestoringFeedsWaitsForTheDrain(t *testing.T) {
 	if err := s.RunMigrations("../../db/migrations"); err != nil {
 		t.Fatalf("migrations: %v", err)
 	}
+	testsupport.LockSettings(t, s.DB)
 	ctx := context.Background()
 	gin.SetMode(gin.TestMode)
 	suffix := time.Now().Format("150405.000")
@@ -485,6 +489,7 @@ func TestCutoffRefusedWhenTheGateRestartsConcurrently(t *testing.T) {
 	if err := s.RunMigrations("../../db/migrations"); err != nil {
 		t.Fatalf("migrations: %v", err)
 	}
+	testsupport.LockSettings(t, s.DB)
 	ctx := context.Background()
 	gin.SetMode(gin.TestMode)
 	suffix := time.Now().Format("150405.000")
@@ -568,6 +573,7 @@ func TestCutoffRefusedAfterThePlanChanges(t *testing.T) {
 	if err := s.RunMigrations("../../db/migrations"); err != nil {
 		t.Fatalf("migrations: %v", err)
 	}
+	testsupport.LockSettings(t, s.DB)
 	ctx := context.Background()
 	gin.SetMode(gin.TestMode)
 	suffix := time.Now().Format("150405.000")
@@ -640,6 +646,7 @@ func TestChangePlanWaitsForTheFeedDrain(t *testing.T) {
 	if err := s.RunMigrations("../../db/migrations"); err != nil {
 		t.Fatalf("migrations: %v", err)
 	}
+	testsupport.LockSettings(t, s.DB)
 	ctx := context.Background()
 	gin.SetMode(gin.TestMode)
 	suffix := time.Now().Format("150405.000")
@@ -787,6 +794,7 @@ func TestGatingStampsTheDatabaseClock(t *testing.T) {
 	if err := s.RunMigrations("../../db/migrations"); err != nil {
 		t.Fatalf("migrations: %v", err)
 	}
+	testsupport.LockSettings(t, s.DB)
 	ctx := context.Background()
 	gin.SetMode(gin.TestMode)
 	suffix := time.Now().Format("150405.000")
@@ -834,6 +842,7 @@ func TestGateAndRowLocksDoNotDeadlock(t *testing.T) {
 	if err := s.RunMigrations("../../db/migrations"); err != nil {
 		t.Fatalf("migrations: %v", err)
 	}
+	testsupport.LockSettings(t, s.DB)
 	ctx := context.Background()
 	gin.SetMode(gin.TestMode)
 	suffix := time.Now().Format("150405.000")
@@ -901,6 +910,7 @@ func TestChangePlanReadsTheTargetPlanUnderLock(t *testing.T) {
 	if err := s.RunMigrations("../../db/migrations"); err != nil {
 		t.Fatalf("migrations: %v", err)
 	}
+	testsupport.LockSettings(t, s.DB)
 	ctx := context.Background()
 	gin.SetMode(gin.TestMode)
 	suffix := time.Now().Format("150405.000")
@@ -993,6 +1003,7 @@ func TestPlanTermsFrozenWhileTheSwitchIsOff(t *testing.T) {
 	if err := s.RunMigrations("../../db/migrations"); err != nil {
 		t.Fatalf("migrations: %v", err)
 	}
+	testsupport.LockSettings(t, s.DB)
 	ctx := context.Background()
 	gin.SetMode(gin.TestMode)
 	suffix := time.Now().Format("150405.000")
@@ -1073,6 +1084,7 @@ func TestRestoringFeedsSeesAPlanCreatedMeanwhile(t *testing.T) {
 	if err := s.RunMigrations("../../db/migrations"); err != nil {
 		t.Fatalf("migrations: %v", err)
 	}
+	testsupport.LockSettings(t, s.DB)
 	ctx := context.Background()
 	gin.SetMode(gin.TestMode)
 	suffix := time.Now().Format("150405.000")
@@ -1140,6 +1152,7 @@ func TestPlanEditWritesOnlyItsOwnFields(t *testing.T) {
 	if err := s.RunMigrations("../../db/migrations"); err != nil {
 		t.Fatalf("migrations: %v", err)
 	}
+	testsupport.LockSettings(t, s.DB)
 	ctx := context.Background()
 	gin.SetMode(gin.TestMode)
 	suffix := time.Now().Format("150405.000")
@@ -1259,6 +1272,7 @@ func TestConcurrentTermEditsMerge(t *testing.T) {
 	if err := s.RunMigrations("../../db/migrations"); err != nil {
 		t.Fatalf("migrations: %v", err)
 	}
+	testsupport.LockSettings(t, s.DB)
 	ctx := context.Background()
 	gin.SetMode(gin.TestMode)
 	suffix := time.Now().Format("150405.000")

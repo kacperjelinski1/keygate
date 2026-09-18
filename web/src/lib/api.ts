@@ -148,26 +148,35 @@ export const portal = {
 }
 
 // ─── Admin ───
+// Every list endpoint answers with its rows under their own name and
+// the same three numbers beside them. `limit` is what the server
+// applied, not what was asked for — it clamps.
+// Builds a list request's query string. Empty and undefined values
+// are left out so a filter that is not set does not become one that
+// matches the empty string.
+function listQuery(params?: Record<string, string | number | undefined>) {
+  const q = new URLSearchParams()
+  for (const [k, v] of Object.entries(params || {})) {
+    if (v !== undefined && v !== "" && v !== null) q.set(k, String(v))
+  }
+  return q.toString()
+}
+
+export type Paged<T> = T & { total: number; limit: number; offset: number }
+
 export const admin = {
   stats: () => get<Stats>("/admin/stats"),
 
-  listProducts: (params?: { search?: string }) => {
-    const q = new URLSearchParams()
-    if (params?.search) q.set("search", params.search)
-    return get<{ products: Product[] }>(`/admin/products?${q}`)
-  },
+  listProducts: (params?: { search?: string; type?: string; limit?: number; offset?: number }) =>
+    get<Paged<{ products: Product[] }>>(`/admin/products?${listQuery(params)}`),
   getProduct: (id: string) => get<Product>(`/admin/products/${id}`),
   createProduct: (data: { name: string; slug: string; type: string; feed_license_required?: boolean }) =>
     post<Product>("/admin/products", data),
   updateProduct: (id: string, data: Partial<Product>) => put<Product>(`/admin/products/${id}`, data),
   deleteProduct: (id: string) => del(`/admin/products/${id}`),
 
-  listPlans: (productId?: string, search?: string) => {
-    const q = new URLSearchParams()
-    if (productId) q.set("product_id", productId)
-    if (search) q.set("search", search)
-    return get<{ plans: Plan[] }>(`/admin/plans?${q}`)
-  },
+  listPlans: (params?: { product_id?: string; search?: string; limit?: number; offset?: number }) =>
+    get<Paged<{ plans: Plan[] }>>(`/admin/plans?${listQuery(params)}`),
   getPlan: (id: string) => get<Plan>(`/admin/plans/${id}`),
   createPlan: (data: Partial<Plan>) => post<Plan>("/admin/plans", data),
   updatePlan: (id: string, data: Partial<Plan>) => put<Plan>(`/admin/plans/${id}`, data),
@@ -227,23 +236,15 @@ export const admin = {
 
   deleteActivation: (id: string) => del(`/admin/activations/${id}`),
 
-  listAPIKeys: (productId?: string, search?: string) => {
-    const q = new URLSearchParams()
-    if (productId) q.set("product_id", productId)
-    if (search) q.set("search", search)
-    return get<{ api_keys: APIKey[] }>(`/admin/api-keys?${q}`)
-  },
+  listAPIKeys: (params?: { product_id?: string; search?: string; limit?: number; offset?: number }) =>
+    get<Paged<{ api_keys: APIKey[] }>>(`/admin/api-keys?${listQuery(params)}`),
   createAPIKey: (data: { product_id?: string; name: string; scopes?: string[] }) =>
     post<APIKey & { key: string }>("/admin/api-keys", data),
   rotateAPIKey: (id: string) => post<APIKey & { key: string }>(`/admin/api-keys/${id}/rotate`, {}),
   deleteAPIKey: (id: string) => del(`/admin/api-keys/${id}`),
 
-  listWebhooks: (productId?: string, search?: string) => {
-    const q = new URLSearchParams()
-    if (productId) q.set("product_id", productId)
-    if (search) q.set("search", search)
-    return get<{ webhooks: WebhookConfig[] }>(`/admin/webhooks?${q}`)
-  },
+  listWebhooks: (params?: { product_id?: string; search?: string; limit?: number; offset?: number }) =>
+    get<Paged<{ webhooks: WebhookConfig[] }>>(`/admin/webhooks?${listQuery(params)}`),
   createWebhook: (data: { product_id: string; url: string; events: string[] }) =>
     post<WebhookConfig & { secret: string }>("/admin/webhooks", data),
   updateWebhook: (id: string, data: Partial<WebhookConfig>) => put<WebhookConfig>(`/admin/webhooks/${id}`, data),
@@ -276,7 +277,8 @@ export const admin = {
   resetUsageCounter: (id: string, data: { feature: string; period?: string; period_key?: string }) =>
     post(`/admin/licenses/${id}/usage/reset`, data),
 
-  getLicenseSeats: (id: string) => get<{ seats: Seat[]; active_count: number }>(`/admin/licenses/${id}/seats`),
+  getLicenseSeats: (id: string, params?: { limit?: number; offset?: number }) =>
+    get<Paged<{ seats: Seat[]; active_count: number }>>(`/admin/licenses/${id}/seats?${listQuery(params)}`),
 
   getAnalytics: (params?: { product_id?: string; from?: string; to?: string; granularity?: string }) => {
     const q = new URLSearchParams()
@@ -342,24 +344,25 @@ export const admin = {
     return get<{ trend: TrendPoint[] }>(`/admin/analytics/activation-trend?${q}`)
   },
 
+  // Cuts a licence loose from a Stripe subscription that is over, so
+  // it can be managed locally again. Refused (409) while Stripe still
+  // has the subscription.
+  unlinkStripeSubscription: (id: string) => post<{ status: string }>(`/admin/licenses/${id}/stripe/unlink`, {}),
   changeLicensePlan: (id: string, data: { plan_id: string }) => post(`/admin/licenses/${id}/change-plan`, data),
 
   // Addons
-  listAddons: (productId?: string, search?: string) => {
-    const q = new URLSearchParams()
-    if (productId) q.set("product_id", productId)
-    if (search) q.set("search", search)
-    return get<{ addons: Addon[] }>(`/admin/addons?${q}`)
-  },
+  listAddons: (params?: { product_id?: string; search?: string; limit?: number; offset?: number }) =>
+    get<Paged<{ addons: Addon[] }>>(`/admin/addons?${listQuery(params)}`),
   createAddon: (data: Partial<Addon>) => post<Addon>("/admin/addons", data),
   updateAddon: (id: string, data: Partial<Addon>) => put<Addon>(`/admin/addons/${id}`, data),
   deleteAddon: (id: string) => del(`/admin/addons/${id}`),
-  getLicenseAddons: (id: string) => get<{ addons: LicenseAddon[] }>(`/admin/licenses/${id}/addons`),
+  getLicenseAddons: (id: string, params?: { limit?: number; offset?: number }) =>
+    get<Paged<{ addons: LicenseAddon[] }>>(`/admin/licenses/${id}/addons?${listQuery(params)}`),
   addLicenseAddon: (id: string, addonId: string) =>
     post<LicenseAddon>(`/admin/licenses/${id}/addons`, { addon_id: addonId }),
   removeLicenseAddon: (id: string, addonId: string) => del(`/admin/licenses/${id}/addons/${addonId}`),
-  getFloatingSessions: (id: string) =>
-    get<{ sessions: FloatingSession[]; active: number }>(`/admin/licenses/${id}/floating`),
+  getFloatingSessions: (id: string, params?: { limit?: number; offset?: number }) =>
+    get<Paged<{ sessions: FloatingSession[]; active: number }>>(`/admin/licenses/${id}/floating?${listQuery(params)}`),
 
   listAuditLogs: (params?: {
     entity?: string
@@ -386,7 +389,8 @@ export const admin = {
   },
 
   // Team (admin management)
-  listTeam: () => get<{ members: User[] }>("/admin/team"),
+  listTeam: (params?: { limit?: number; offset?: number }) =>
+    get<Paged<{ members: User[] }>>(`/admin/team?${listQuery(params)}`),
   inviteTeamMember: (data: { email: string; role?: string }) => post<User>("/admin/team", data),
   removeTeamMember: (id: string) => del(`/admin/team/${id}`),
 

@@ -321,6 +321,13 @@ func main() {
 	// are gone.
 	db.SetFeedURLTTL(feedTTL)
 	adminH.FeedURLTTL = feedTTL
+	// Whether a Stripe subscription is over is Stripe's answer to
+	// give; the admin API asks through this rather than reaching for
+	// the SDK itself. Left nil without an API key, where the question
+	// cannot be put at all.
+	if cfg.StripeSecretKey != "" {
+		adminH.SubscriptionEnded = stripeH.SubscriptionEnded
+	}
 	// Recorded across replicas and across restarts: links signed
 	// before this start keep the lifetime they were signed with, so
 	// the wait is measured against the longest this install is known
@@ -784,7 +791,7 @@ func main() {
 				response.BadRequest(c, "product_id is required")
 				return
 			}
-			plans, err := db.ListPlans(c, productID, "")
+			plans, _, err := db.ListPlans(c, productID, "", store.All)
 			if err != nil {
 				response.Internal(c)
 				return
@@ -1020,6 +1027,9 @@ func main() {
 		licWrite.POST("/licenses/:id/valid-until", adminH.SetLicenseValidUntil)
 		licWrite.POST("/licenses/:id/updates-until", adminH.SetLicenseUpdatesUntil)
 		licWrite.POST("/licenses/:id/change-plan", adminH.ChangeLicensePlan)
+		// Cuts a licence loose from a subscription Stripe has
+		// finished with, so it can be managed locally again.
+		licWrite.POST("/licenses/:id/stripe/unlink", adminH.UnlinkStripeSubscription)
 		licWrite.GET("/licenses/:id/usage", adminH.ListLicenseUsage)
 		licWrite.POST("/licenses/:id/usage/reset", adminH.ResetLicenseUsage)
 		licWrite.GET("/licenses/:id/seats", adminH.ListLicenseSeats)

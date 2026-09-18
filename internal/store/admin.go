@@ -16,14 +16,36 @@ import (
 
 // ─── Product ───
 
-func (s *Store) ListProducts(ctx context.Context, search string) ([]*model.Product, error) {
+// ListProducts returns one page of the catalogue and how many
+// products the filter matched.
+//
+// types narrows to the product kinds the caller can actually use — the
+// releases pages ask for the ones that ship binaries. Filtering here
+// rather than over the page the dashboard happens to hold is the
+// difference between "these are the products you can pick" and "these
+// are the ones that were on screen".
+//
+// The order carries id as a tiebreaker: two products created in the
+// same instant would otherwise be free to swap places between two
+// queries, and under paging that means a row shown twice while
+// another is never shown at all.
+func (s *Store) ListProducts(ctx context.Context, search string, types []string, p Page) ([]*model.Product, int, error) {
 	var out []*model.Product
-	q := s.DB.NewSelect().Model(&out).OrderExpr("created_at DESC")
+	q := s.DB.NewSelect().Model(&out).OrderExpr("created_at DESC, id DESC")
+	if len(types) > 0 {
+		q = q.Where("type IN (?)", bun.In(types))
+	}
 	if search != "" {
 		q = q.Where("name ILIKE ? OR slug ILIKE ?", "%"+search+"%", "%"+search+"%")
 	}
-	err := q.Scan(ctx)
-	return out, err
+	total, err := scanPage(ctx, q, p)
+	if err != nil {
+		return nil, 0, err
+	}
+	if p.Limit <= 0 {
+		total = len(out)
+	}
+	return out, total, nil
 }
 
 func (s *Store) FindProductByID(ctx context.Context, id string) (*model.Product, error) {
@@ -82,24 +104,60 @@ func UpdateProductIn(ctx context.Context, db bun.IDB, p *model.Product, cols ...
 	return err
 }
 
+// DeleteProduct removes the product and the rows the 20260515 bundle
+// refactor left behind for it.
+//
+// releases_legacy is that migration's rollback evidence: the old
+// releases table, renamed and kept whole so the down migration can
+// rename it back. Nothing reads it, no endpoint can clear it, and its
+// product_id still restricts — so on an install that upgraded through
+// that migration, a product whose current releases have all been
+// deleted would still refuse to go, with nothing the admin could do
+// about it. The rows for this one product are dropped with it; the
+// rest of the table, and the rollback it exists for, are untouched.
 func (s *Store) DeleteProduct(ctx context.Context, id string) error {
-	_, err := s.DB.NewDelete().Model((*model.Product)(nil)).Where("id = ?", id).Exec(ctx)
-	return err
+	return RunInTx(ctx, s.DB, func(ctx context.Context, tx bun.Tx) error {
+		// Asked before the delete rather than caught after it: a
+		// failed statement poisons the transaction, and an install
+		// created after the refactor has no such table.
+		var legacy bool
+		if err := tx.NewRaw("SELECT to_regclass('public.releases_legacy') IS NOT NULL").Scan(ctx, &legacy); err != nil {
+			return err
+		}
+		if legacy {
+			if _, err := tx.NewRaw("DELETE FROM releases_legacy WHERE product_id = ?", id).Exec(ctx); err != nil {
+				return err
+			}
+		}
+		_, err := tx.NewDelete().Model((*model.Product)(nil)).Where("id = ?", id).Exec(ctx)
+		return err
+	})
 }
 
 // ─── Plan ───
 
-func (s *Store) ListPlans(ctx context.Context, productID, search string) ([]*model.Plan, error) {
+// ListPlans returns one page of a product's plans (or of every
+// product's, unfiltered) and how many the filter matched. Entitlements
+// are a has-many relation, which bun loads in a query of its own, so
+// the limit applies to plans and not to their rows.
+func (s *Store) ListPlans(ctx context.Context, productID, search string, p Page) ([]*model.Plan, int, error) {
 	var out []*model.Plan
-	q := s.DB.NewSelect().Model(&out).Relation("Entitlements").Relation("Product").OrderExpr("sort_order ASC, plan.created_at DESC")
+	q := s.DB.NewSelect().Model(&out).Relation("Entitlements").Relation("Product").
+		OrderExpr("sort_order ASC, plan.created_at DESC, plan.id DESC")
 	if productID != "" {
 		q = q.Where("plan.product_id = ?", productID)
 	}
 	if search != "" {
 		q = q.Where("plan.name ILIKE ? OR plan.slug ILIKE ?", "%"+search+"%", "%"+search+"%")
 	}
-	err := q.Scan(ctx)
-	return out, err
+	total, err := scanPage(ctx, q, p)
+	if err != nil {
+		return nil, 0, err
+	}
+	if p.Limit <= 0 {
+		total = len(out)
+	}
+	return out, total, nil
 }
 
 // FillPlanIDs gives a new plan the ids CreatePlan would, for callers
@@ -243,17 +301,24 @@ func (s *Store) DeleteEntitlement(ctx context.Context, id string) error {
 
 // ─── API Key ───
 
-func (s *Store) ListAPIKeys(ctx context.Context, productID, search string) ([]*model.APIKey, error) {
+func (s *Store) ListAPIKeys(ctx context.Context, productID, search string, p Page) ([]*model.APIKey, int, error) {
 	var out []*model.APIKey
-	q := s.DB.NewSelect().Model(&out).Relation("Product").OrderExpr("api_key.created_at DESC")
+	q := s.DB.NewSelect().Model(&out).Relation("Product").
+		OrderExpr("api_key.created_at DESC, api_key.id DESC")
 	if productID != "" {
 		q = q.Where("api_key.product_id = ?", productID)
 	}
 	if search != "" {
 		q = q.Where("api_key.name ILIKE ? OR api_key.prefix ILIKE ?", "%"+search+"%", "%"+search+"%")
 	}
-	err := q.Scan(ctx)
-	return out, err
+	total, err := scanPage(ctx, q, p)
+	if err != nil {
+		return nil, 0, err
+	}
+	if p.Limit <= 0 {
+		total = len(out)
+	}
+	return out, total, nil
 }
 
 func (s *Store) CreateAPIKey(ctx context.Context, ak *model.APIKey, rawKey string) error {
@@ -404,7 +469,7 @@ func (s *Store) ExportLicenses(ctx context.Context, productID, status string) ([
 // is best-effort: 2-hop entities (seat, activation, release_artifact)
 // aren't matched and silently fall out of the filtered view.
 func (s *Store) ListAuditLogs(ctx context.Context, entity, entityID, productID string, offset, limit int) ([]*model.AuditLog, int, error) {
-	q := s.DB.NewSelect().Model((*model.AuditLog)(nil)).OrderExpr("created_at DESC")
+	q := s.DB.NewSelect().Model((*model.AuditLog)(nil)).OrderExpr("created_at DESC, id DESC")
 	if entity != "" {
 		q = q.Where("entity = ?", entity)
 	}
@@ -490,7 +555,7 @@ func (s *Store) ListUsers(ctx context.Context, search string, offset, limit int)
 		return nil, 0, err
 	}
 	var out []*model.User
-	err = q.OrderExpr("created_at DESC").
+	err = q.OrderExpr("created_at DESC, id DESC").
 		Offset(offset).Limit(limit).Scan(ctx, &out)
 	return out, total, err
 }
@@ -528,6 +593,30 @@ func (s *Store) FindProductBySlug(ctx context.Context, slug string) (*model.Prod
 
 func (s *Store) ProductLicenseCount(ctx context.Context, productID string) (int, error) {
 	return s.DB.NewSelect().Model((*model.License)(nil)).Where("product_id = ?", productID).Count(ctx)
+}
+
+// ProductBlockers counts what a product delete would have to destroy
+// and the database refuses to: plans, licences and releases all hold
+// it by a foreign key that restricts. All three are counted in one
+// call so the caller can name the one that matters most rather than
+// whichever query happened to run first.
+//
+// What is NOT counted is what the database removes with the product
+// (api keys, webhooks, addons, signing keys, analytics): those
+// cascade by design.
+func (s *Store) ProductBlockers(ctx context.Context, productID string) (plans, licenses, releases int, err error) {
+	if plans, err = s.DB.NewSelect().Model((*model.Plan)(nil)).
+		Where("product_id = ?", productID).Count(ctx); err != nil {
+		return 0, 0, 0, err
+	}
+	if licenses, err = s.ProductLicenseCount(ctx, productID); err != nil {
+		return 0, 0, 0, err
+	}
+	if releases, err = s.DB.NewSelect().Model((*model.Release)(nil)).
+		Where("product_id = ?", productID).Count(ctx); err != nil {
+		return 0, 0, 0, err
+	}
+	return plans, licenses, releases, nil
 }
 
 func (s *Store) PlanLicenseCount(ctx context.Context, planID string) (int, error) {

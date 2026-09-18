@@ -14,7 +14,7 @@ import {
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
-import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog"
+import { Dialog, DialogBody, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { useI18n } from "@/i18n"
 import { admin } from "@/lib/api"
 
@@ -182,53 +182,57 @@ export default function EmailTemplatesManager() {
 
       {/* Edit Dialog */}
       <Dialog open={!!editing} onOpenChange={(open) => !open && setEditing(null)}>
-        <DialogContent className="max-w-3xl max-h-[85vh]">
+        <DialogContent className="max-w-3xl">
           <DialogHeader>
             <DialogTitle>
               {t("settings.editTemplate")}: {editing && TEMPLATE_META[editing]?.label}
             </DialogTitle>
           </DialogHeader>
-          <div className="space-y-3">
-            <div className="text-xs text-muted-foreground">
-              {t("settings.templateVariables")}:{" "}
-              {editing && TEMPLATE_META[editing]?.variables.map((v) => `{{.${v}}}`).join(", ")}
+          <DialogBody>
+            <div className="space-y-3">
+              <div className="text-xs text-muted-foreground">
+                {t("settings.templateVariables")}:{" "}
+                {editing && TEMPLATE_META[editing]?.variables.map((v) => `{{.${v}}}`).join(", ")}
+              </div>
+              <textarea
+                className="w-full h-64 font-mono text-xs p-3 border rounded-lg bg-muted/50 resize-y focus:outline-none focus:ring-2 focus:ring-primary"
+                value={editValue}
+                onChange={(e) => setEditValue(e.target.value)}
+              />
+              <div className="flex justify-end gap-2">
+                <Button variant="outline" onClick={() => setEditing(null)}>
+                  {t("common.cancel")}
+                </Button>
+                <Button
+                  onClick={() => editing && saveMut.mutate({ key: editing, value: editValue })}
+                  disabled={saveMut.isPending}
+                >
+                  {saveMut.isPending ? t("common.loading") : t("common.save")}
+                </Button>
+              </div>
             </div>
-            <textarea
-              className="w-full h-64 font-mono text-xs p-3 border rounded-lg bg-muted/50 resize-y focus:outline-none focus:ring-2 focus:ring-primary"
-              value={editValue}
-              onChange={(e) => setEditValue(e.target.value)}
-            />
-            <div className="flex justify-end gap-2">
-              <Button variant="outline" onClick={() => setEditing(null)}>
-                {t("common.cancel")}
-              </Button>
-              <Button
-                onClick={() => editing && saveMut.mutate({ key: editing, value: editValue })}
-                disabled={saveMut.isPending}
-              >
-                {saveMut.isPending ? t("common.loading") : t("common.save")}
-              </Button>
-            </div>
-          </div>
+          </DialogBody>
         </DialogContent>
       </Dialog>
 
       {/* Preview Dialog — uses sandboxed iframe for safe HTML rendering */}
       <Dialog open={!!previewing} onOpenChange={(open) => !open && setPreviewing(null)}>
-        <DialogContent className="max-w-2xl max-h-[85vh]">
+        <DialogContent className="max-w-2xl">
           <DialogHeader>
             <DialogTitle>
               {t("settings.templatePreview")}: {previewing && TEMPLATE_META[previewing]?.label}
             </DialogTitle>
           </DialogHeader>
-          {previewing && (
-            <iframe
-              title="Email Preview"
-              sandbox=""
-              srcDoc={getPreviewHtml(previewing)}
-              className="w-full h-96 border rounded-lg bg-white"
-            />
-          )}
+          <DialogBody>
+            {previewing && (
+              <iframe
+                title="Email Preview"
+                sandbox=""
+                srcDoc={getPreviewHtml(previewing)}
+                className="w-full h-96 border rounded-lg bg-white"
+              />
+            )}
+          </DialogBody>
         </DialogContent>
       </Dialog>
 

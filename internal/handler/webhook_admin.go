@@ -36,12 +36,13 @@ func (h *WebhookAdminHandler) ListWebhooks(c *gin.Context) {
 			productID = ak.ProductID
 		}
 	}
-	webhooks, err := h.Store.ListWebhooks(c, productID, c.Query("search"))
+	page := listPage(c)
+	webhooks, total, err := h.Store.ListWebhooks(c, productID, c.Query("search"), page)
 	if err != nil {
 		response.Internal(c)
 		return
 	}
-	response.OK(c, gin.H{"webhooks": webhooks})
+	listOK(c, "webhooks", webhooks, total, page)
 }
 
 func (h *WebhookAdminHandler) CreateWebhook(c *gin.Context) {

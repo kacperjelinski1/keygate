@@ -7,6 +7,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tabloy/keygate/internal/testsupport"
+
 	"github.com/tabloy/keygate/internal/model"
 )
 
@@ -302,6 +304,7 @@ func TestCreateLicenseHoldsTheMaintenanceSwitch(t *testing.T) {
 	if err := s.RunMigrations("../../db/migrations"); err != nil {
 		t.Fatalf("migrations: %v", err)
 	}
+	testsupport.LockSettings(t, s.DB)
 	ctx := context.Background()
 	prev, _ := s.GetSetting(ctx, SettingMaintenanceFeatures)
 	defer func() {
@@ -359,6 +362,7 @@ func TestCreateLicenseRefusesAMovedUpdatePeriod(t *testing.T) {
 	if err := s.RunMigrations("../../db/migrations"); err != nil {
 		t.Fatalf("migrations: %v", err)
 	}
+	testsupport.LockSettings(t, s.DB)
 	ctx := context.Background()
 	if err := s.SetSettings(ctx, map[string]string{SettingMaintenanceFeatures: "true"}); err != nil {
 		t.Fatal(err)

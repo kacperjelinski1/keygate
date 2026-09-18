@@ -24,9 +24,17 @@ import {
   DataTableHeader,
   DataTablePagination,
   DataTableRow,
-  useClientPagination,
+  useServerPagination,
 } from "@/components/ui/data-table"
-import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog"
+import {
+  Dialog,
+  DialogBody,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { useI18n } from "@/i18n"
@@ -37,9 +45,10 @@ export default function ProductsPage() {
   const { t } = useI18n()
   const qc = useQueryClient()
   const [search, setSearch] = useState("")
+  const pg = useServerPagination(10, [search])
   const { data, isLoading } = useQuery({
-    queryKey: ["admin", "products", search],
-    queryFn: () => admin.listProducts({ search: search || undefined }),
+    queryKey: ["admin", "products", search, pg.page, pg.pageSize],
+    queryFn: () => admin.listProducts({ search, ...pg.params }),
   })
   const [editing, setEditing] = useState<Product | null>(null)
   const [creating, setCreating] = useState(false)
@@ -72,8 +81,7 @@ export default function ProductsPage() {
     onError: (e: Error) => showToast(e.message, "error"),
   })
 
-  const products = data?.products || []
-  const { page, setPage, pageSize, setPageSize, total, totalPages, paginatedItems } = useClientPagination(products, 10)
+  const { items: products, total, totalPages } = pg.from(data, data?.products)
 
   return (
     <div className="space-y-6">
@@ -95,7 +103,7 @@ export default function ProductsPage() {
             value={search}
             onChange={(e) => {
               setSearch(e.target.value)
-              setPage(0)
+              pg.setPage(0)
             }}
             className="pl-9"
           />
@@ -119,8 +127,8 @@ export default function ProductsPage() {
                   </DataTableRow>
                 </DataTableHeader>
                 <DataTableBody>
-                  {paginatedItems.length === 0 && <DataTableEmpty colSpan={5} message={t("products.empty")} />}
-                  {paginatedItems.map((p) => (
+                  {products.length === 0 && <DataTableEmpty colSpan={5} message={t("products.empty")} />}
+                  {products.map((p) => (
                     <DataTableRow key={p.id}>
                       <DataTableCell className="font-medium">{p.name}</DataTableCell>
                       <DataTableCell>
@@ -148,12 +156,12 @@ export default function ProductsPage() {
               </DataTable>
               {total > 0 && (
                 <DataTablePagination
-                  page={page}
+                  page={pg.page}
                   totalPages={totalPages}
                   total={total}
-                  pageSize={pageSize}
-                  onPageChange={setPage}
-                  onPageSizeChange={setPageSize}
+                  pageSize={pg.pageSize}
+                  onPageChange={pg.setPage}
+                  onPageSizeChange={pg.setPageSize}
                 />
               )}
             </>
@@ -243,89 +251,91 @@ function ProductDialog({
           <DialogTitle>{title}</DialogTitle>
           <DialogDescription>{t("products.formDesc")}</DialogDescription>
         </DialogHeader>
-        <form onSubmit={handleSubmit} className="space-y-4">
-          <div className="space-y-2">
-            <Label>{t("common.name")}</Label>
-            <Input
-              value={name}
-              onChange={(e) => {
-                setName(e.target.value)
-                if (!product)
-                  setSlug(
-                    e.target.value
-                      .toLowerCase()
-                      .replace(/[^a-z0-9]+/g, "-")
-                      .replace(/(^-|-$)/g, ""),
-                  )
-              }}
-              required
-            />
-          </div>
-          <div className="space-y-2">
-            <Label>{t("products.slug")}</Label>
-            <Input value={slug} onChange={(e) => setSlug(e.target.value)} required />
-          </div>
-          <div className="space-y-2">
-            <Label>{t("common.type")}</Label>
-            <div className="grid grid-cols-3 gap-3">
-              <ProductTypeCard
-                value="desktop"
-                icon={Laptop}
-                title={t("products.desktop")}
-                description={t("products.desktopDesc")}
-                selected={type === "desktop"}
-                onSelect={() => setType("desktop")}
-              />
-              <ProductTypeCard
-                value="saas"
-                icon={Cloud}
-                title={t("products.saas")}
-                description={t("products.saasDesc")}
-                selected={type === "saas"}
-                onSelect={() => setType("saas")}
-              />
-              <ProductTypeCard
-                value="hybrid"
-                icon={Layers}
-                title={t("products.hybrid")}
-                description={t("products.hybridDesc")}
-                selected={type === "hybrid"}
-                onSelect={() => setType("hybrid")}
+        <form onSubmit={handleSubmit} className="flex min-h-0 flex-1 flex-col gap-4">
+          <DialogBody className="space-y-4">
+            <div className="space-y-2">
+              <Label>{t("common.name")}</Label>
+              <Input
+                value={name}
+                onChange={(e) => {
+                  setName(e.target.value)
+                  if (!product)
+                    setSlug(
+                      e.target.value
+                        .toLowerCase()
+                        .replace(/[^a-z0-9]+/g, "-")
+                        .replace(/(^-|-$)/g, ""),
+                    )
+                }}
+                required
               />
             </div>
-          </div>
-          {/* Only products that ship releases have a feed to gate.
+            <div className="space-y-2">
+              <Label>{t("products.slug")}</Label>
+              <Input value={slug} onChange={(e) => setSlug(e.target.value)} required />
+            </div>
+            <div className="space-y-2">
+              <Label>{t("common.type")}</Label>
+              <div className="grid grid-cols-3 gap-3">
+                <ProductTypeCard
+                  value="desktop"
+                  icon={Laptop}
+                  title={t("products.desktop")}
+                  description={t("products.desktopDesc")}
+                  selected={type === "desktop"}
+                  onSelect={() => setType("desktop")}
+                />
+                <ProductTypeCard
+                  value="saas"
+                  icon={Cloud}
+                  title={t("products.saas")}
+                  description={t("products.saasDesc")}
+                  selected={type === "saas"}
+                  onSelect={() => setType("saas")}
+                />
+                <ProductTypeCard
+                  value="hybrid"
+                  icon={Layers}
+                  title={t("products.hybrid")}
+                  description={t("products.hybridDesc")}
+                  selected={type === "hybrid"}
+                  onSelect={() => setType("hybrid")}
+                />
+              </div>
+            </div>
+            {/* Only products that ship releases have a feed to gate.
               Offered at creation too: a product that has published
               nothing handed out no feed, so gating it then costs no
               waiting at all. */}
-          {type !== "saas" && (
-            <div className="space-y-1">
-              <div className="flex items-center gap-3">
-                <input
-                  type="checkbox"
-                  id="feed-license-required"
-                  checked={feedLicenseRequired}
-                  onChange={(e) => setFeedLicenseRequired(e.target.checked)}
-                  className="h-4 w-4 rounded border-input accent-primary"
-                />
-                <Label htmlFor="feed-license-required">{t("products.feedLicenseRequired")}</Label>
-                {/* The rollout order and the header/token detail are
+            {type !== "saas" && (
+              <div className="space-y-1">
+                <div className="flex items-center gap-3">
+                  <input
+                    type="checkbox"
+                    id="feed-license-required"
+                    checked={feedLicenseRequired}
+                    onChange={(e) => setFeedLicenseRequired(e.target.checked)}
+                    className="h-4 w-4 rounded border-input accent-primary"
+                  />
+                  <Label htmlFor="feed-license-required">{t("products.feedLicenseRequired")}</Label>
+                  {/* The rollout order and the header/token detail are
                     for the one operator setting this up, not for
                     everyone who opens the dialog: one line here, the
                     rest on hover. */}
-                <HelpTip text={t("products.feedLicenseRequiredHelp")} />
+                  <HelpTip text={t("products.feedLicenseRequiredHelp")} />
+                </div>
+                <p className="text-xs text-muted-foreground">{t("products.feedLicenseRequiredHint")}</p>
               </div>
-              <p className="text-xs text-muted-foreground">{t("products.feedLicenseRequiredHint")}</p>
-            </div>
-          )}
-          <div className="flex justify-end gap-2 pt-2">
+            )}
+          </DialogBody>
+          <DialogFooter>
             <Button type="button" variant="outline" onClick={onClose}>
               {t("common.cancel")}
             </Button>
             <Button type="submit" disabled={loading}>
               {loading ? t("common.loading") : t("common.save")}
             </Button>
-          </div>
+          </DialogFooter>
         </form>
       </DialogContent>
     </Dialog>

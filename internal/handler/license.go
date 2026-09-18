@@ -2,6 +2,7 @@ package handler
 
 import (
 	"errors"
+	"strconv"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -117,6 +118,14 @@ func writeAppErr(c *gin.Context, err error) {
 	var ae *apperr.AppError
 	if errors.As(err, &ae) {
 		if ae.Details != nil {
+			// A refusal that says how long to wait says it in the
+			// header too, so a client that reads neither the body nor
+			// our error codes still backs off.
+			if d, ok := ae.Details.(map[string]any); ok {
+				if secs, ok := d["retry_after"].(int); ok && secs > 0 {
+					c.Header("Retry-After", strconv.Itoa(secs))
+				}
+			}
 			response.ErrWithDetails(c, ae.Status, ae.Code, ae.Message, ae.Details)
 		} else {
 			response.Err(c, ae.Status, ae.Code, ae.Message)

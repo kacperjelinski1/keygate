@@ -858,12 +858,6 @@ func channelFallbackChain(c string) []string {
 
 const latestComputeWindow = 1000
 
-// findLatestPublished returns the highest-semver published release in
-// the channel-fallback chain. When platform is non-empty, candidates
-// are restricted to releases that have an uploaded artifact for that
-// platform, so the "latest" reflects what the client can actually
-// download — not the absolute newest version that happens to lack
-// their platform.
 // releaseWithinUpdates reports whether a license whose maintenance
 // period ends at updatesUntil may install rel. Nil means no limit. A
 // release whose publish date is unknown cannot be shown to predate

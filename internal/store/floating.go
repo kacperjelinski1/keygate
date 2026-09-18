@@ -114,12 +114,19 @@ func (s *Store) FindFloatingSession(ctx context.Context, licenseID, identifier s
 		Where("license_id = ? AND identifier = ? AND expires_at > now()", licenseID, identifier).Scan(ctx)
 }
 
-func (s *Store) ListFloatingSessions(ctx context.Context, licenseID string) ([]*model.FloatingSession, error) {
+func (s *Store) ListFloatingSessions(ctx context.Context, licenseID string, p Page) ([]*model.FloatingSession, int, error) {
 	var out []*model.FloatingSession
-	err := s.DB.NewSelect().Model(&out).
+	q := s.DB.NewSelect().Model(&out).
 		Where("license_id = ? AND expires_at > now()", licenseID).
-		OrderExpr("checked_out ASC").Scan(ctx)
-	return out, err
+		OrderExpr("checked_out ASC, id ASC")
+	total, err := scanPage(ctx, q, p)
+	if err != nil {
+		return nil, 0, err
+	}
+	if p.Limit <= 0 {
+		total = len(out)
+	}
+	return out, total, nil
 }
 
 func (s *Store) CleanExpiredFloating(ctx context.Context) (int, error) {

@@ -1,7 +1,23 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
-import { Ban, Check, Copy, Eye, Package, Pause, Pencil, Play, Plus, RefreshCw, Search, Trash2 } from "lucide-react"
+import {
+  Ban,
+  Check,
+  Copy,
+  Eye,
+  Package,
+  Pause,
+  Pencil,
+  Play,
+  Plus,
+  RefreshCw,
+  Search,
+  Trash2,
+  Unlink,
+} from "lucide-react"
 import { useState } from "react"
 import { Link } from "react-router-dom"
+import { PlanSelect } from "@/components/plan-select"
+import { ProductSelect } from "@/components/product-select"
 import { showToast } from "@/components/toast"
 import {
   AlertDialog,
@@ -25,15 +41,24 @@ import {
   DataTableHeader,
   DataTablePagination,
   DataTableRow,
+  useServerPagination,
 } from "@/components/ui/data-table"
-import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog"
+import {
+  Dialog,
+  DialogBody,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Separator } from "@/components/ui/separator"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { useI18n } from "@/i18n"
-import { admin } from "@/lib/api"
+import { admin, type Plan } from "@/lib/api"
 import { formatDate, statusColor } from "@/lib/utils"
 
 // A date picked in the expiry field means "valid through that whole
@@ -66,19 +91,23 @@ export default function LicensesPage() {
   const [productFilter, setProductFilter] = useState<string>("")
   const [statusFilter, setStatusFilter] = useState<string>("")
   const [search, setSearch] = useState("")
-  const [page, setPage] = useState(0)
-  const limit = 20
+  const pg = useServerPagination(20, [productFilter, statusFilter, search])
 
-  const { data: productsData } = useQuery({ queryKey: ["admin", "products"], queryFn: () => admin.listProducts() })
+  const { data: productsData } = useQuery({
+    // One row is all this page needs from the catalogue: whether the
+    // install has any product at all, and which one a new form starts
+    // on. The pickers fetch their own candidates, with search.
+    queryKey: ["admin", "products", "newest"],
+    queryFn: () => admin.listProducts({ limit: 1 }),
+  })
   const { data, isLoading } = useQuery({
-    queryKey: ["admin", "licenses", productFilter, statusFilter, search, page],
+    queryKey: ["admin", "licenses", productFilter, statusFilter, search, pg.page, pg.pageSize],
     queryFn: () =>
       admin.listLicenses({
         product_id: productFilter || undefined,
         status: statusFilter || undefined,
         search: search || undefined,
-        offset: page * limit,
-        limit,
+        ...pg.params,
       }),
   })
 
@@ -86,9 +115,7 @@ export default function LicensesPage() {
   const [viewing, setViewing] = useState<string | null>(null)
 
   const products = productsData?.products || []
-  const licenses = data?.licenses || []
-  const total = data?.total || 0
-  const totalPages = Math.ceil(total / limit)
+  const { items: licenses, total, totalPages } = pg.from(data, data?.licenses)
 
   const createMut = useMutation({
     mutationFn: admin.createLicense,
@@ -143,39 +170,12 @@ export default function LicensesPage() {
           <Input
             placeholder={t("common.search")}
             value={search}
-            onChange={(e) => {
-              setSearch(e.target.value)
-              setPage(0)
-            }}
+            onChange={(e) => setSearch(e.target.value)}
             className="pl-9"
           />
         </div>
-        <Select
-          value={productFilter}
-          onValueChange={(v) => {
-            setProductFilter(v === "all" ? "" : v)
-            setPage(0)
-          }}
-        >
-          <SelectTrigger className="w-48">
-            <SelectValue placeholder={t("filter.allProducts")} />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="all">{t("filter.allProducts")}</SelectItem>
-            {products.map((p) => (
-              <SelectItem key={p.id} value={p.id}>
-                {p.name}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-        <Select
-          value={statusFilter}
-          onValueChange={(v) => {
-            setStatusFilter(v === "all" ? "" : v)
-            setPage(0)
-          }}
-        >
+        <ProductSelect value={productFilter} onChange={setProductFilter} allLabel={t("filter.allProducts")} />
+        <Select value={statusFilter} onValueChange={(v) => setStatusFilter(v === "all" ? "" : v)}>
           <SelectTrigger className="w-40">
             <SelectValue placeholder={t("filter.allStatuses")} />
           </SelectTrigger>
@@ -241,11 +241,12 @@ export default function LicensesPage() {
               </DataTable>
               {total > 0 && (
                 <DataTablePagination
-                  page={page}
+                  page={pg.page}
                   totalPages={totalPages}
                   total={total}
-                  pageSize={limit}
-                  onPageChange={setPage}
+                  pageSize={pg.pageSize}
+                  onPageChange={pg.setPage}
+                  onPageSizeChange={pg.setPageSize}
                 />
               )}
             </>
@@ -300,18 +301,18 @@ function CreateLicenseDialog({
   const [externalWorkspaceID, setExternalWorkspaceID] = useState("")
   const [validUntil, setValidUntil] = useState("")
 
-  const { data: plansData } = useQuery({
-    queryKey: ["admin", "plans", productId],
-    queryFn: () => admin.listPlans(productId),
-    enabled: !!productId,
-  })
-  const plans = plansData?.plans || []
-
   // Show a hint right under the product dropdown so admin knows what
   // they're committing to — saas licenses don't get device activation,
   // desktop licenses don't get seats, etc. Mirrors the backend
   // capability gate so admins can predict downstream behavior.
-  const selectedProduct = products.find((p) => p.id === productId)
+  // Same reason as the plan form: the picked product may be outside
+  // the page the picker loaded, and the hint below (and the capability
+  // it implies) has to describe the product actually chosen.
+  const { data: selectedProduct } = useQuery({
+    queryKey: ["admin", "product", productId],
+    queryFn: () => admin.getProduct(productId),
+    enabled: !!productId,
+  })
   const productType = selectedProduct?.type
   const typeHintKey =
     productType === "desktop"
@@ -342,96 +343,84 @@ function CreateLicenseDialog({
               valid_until: validUntil ? endOfDayISO(validUntil) : undefined,
             })
           }}
-          className="space-y-4"
+          className="flex min-h-0 flex-1 flex-col gap-4"
         >
-          <div className="space-y-2">
-            <Label>{t("common.product")}</Label>
-            <Select
-              value={productId}
-              onValueChange={(v) => {
-                setProductId(v)
-                setPlanId("")
-              }}
-            >
-              <SelectTrigger>
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {products.map((p) => (
-                  <SelectItem key={p.id} value={p.id}>
-                    {p.name}
-                    {p.type ? <span className="ml-2 text-xs text-muted-foreground">[{p.type}]</span> : null}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-            {typeHintKey && <p className="text-xs text-muted-foreground">{t(typeHintKey)}</p>}
-          </div>
-          <div className="space-y-2">
-            <Label>{t("common.plan")}</Label>
-            <Select value={planId} onValueChange={setPlanId}>
-              <SelectTrigger>
-                <SelectValue placeholder="Select a plan" />
-              </SelectTrigger>
-              <SelectContent>
-                {plans.map((p) => (
-                  <SelectItem key={p.id} value={p.id}>
-                    {p.name}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
-          <div className="space-y-2">
-            <Label>{t("common.email")}</Label>
-            <Input type="email" value={email} onChange={(e) => setEmail(e.target.value)} required />
-          </div>
-          <div className="space-y-2">
-            <Label>{t("licenses.notesOptional")}</Label>
-            <Input value={notes} onChange={(e) => setNotes(e.target.value)} />
-          </div>
-          <div className="space-y-2">
-            <Label>{t("licenses.validUntilOptional")}</Label>
-            <Input
-              type="date"
-              value={validUntil}
-              min={new Date().toISOString().slice(0, 10)}
-              onChange={(e) => setValidUntil(e.target.value)}
-            />
-            <p className="text-xs text-muted-foreground">{t("licenses.validUntilHint")}</p>
-          </div>
-          {/* External identifiers — opaque strings the merchant uses
+          <DialogBody className="space-y-4">
+            <div className="space-y-2">
+              <Label>{t("common.product")}</Label>
+              <ProductSelect
+                value={productId}
+                onChange={(v) => {
+                  setProductId(v)
+                  setPlanId("")
+                }}
+                className="w-full"
+                withType
+              />
+              {typeHintKey && <p className="text-xs text-muted-foreground">{t(typeHintKey)}</p>}
+            </div>
+            <div className="space-y-2">
+              <Label>{t("common.plan")}</Label>
+              <PlanSelect
+                productId={productId}
+                value={planId}
+                onChange={setPlanId}
+                placeholder={t("licenses.selectPlan")}
+                className="w-full"
+                withType
+              />
+            </div>
+            <div className="space-y-2">
+              <Label>{t("common.email")}</Label>
+              <Input type="email" value={email} onChange={(e) => setEmail(e.target.value)} required />
+            </div>
+            <div className="space-y-2">
+              <Label>{t("licenses.notesOptional")}</Label>
+              <Input value={notes} onChange={(e) => setNotes(e.target.value)} />
+            </div>
+            <div className="space-y-2">
+              <Label>{t("licenses.validUntilOptional")}</Label>
+              <Input
+                type="date"
+                value={validUntil}
+                min={new Date().toISOString().slice(0, 10)}
+                onChange={(e) => setValidUntil(e.target.value)}
+              />
+              <p className="text-xs text-muted-foreground">{t("licenses.validUntilHint")}</p>
+            </div>
+            {/* External identifiers — opaque strings the merchant uses
               to map their own user/workspace model to this license.
               Both optional; leave blank if not integrating with an
               external system. */}
-          <div className="grid grid-cols-2 gap-3">
-            <div className="space-y-2">
-              <Label>{t("licenses.externalCustomerID")}</Label>
-              <Input
-                value={externalCustomerID}
-                onChange={(e) => setExternalCustomerID(e.target.value)}
-                placeholder={t("licenses.externalIDPlaceholder")}
-                maxLength={256}
-              />
+            <div className="grid grid-cols-2 gap-3">
+              <div className="space-y-2">
+                <Label>{t("licenses.externalCustomerID")}</Label>
+                <Input
+                  value={externalCustomerID}
+                  onChange={(e) => setExternalCustomerID(e.target.value)}
+                  placeholder={t("licenses.externalIDPlaceholder")}
+                  maxLength={256}
+                />
+              </div>
+              <div className="space-y-2">
+                <Label>{t("licenses.externalWorkspaceID")}</Label>
+                <Input
+                  value={externalWorkspaceID}
+                  onChange={(e) => setExternalWorkspaceID(e.target.value)}
+                  placeholder={t("licenses.externalIDPlaceholder")}
+                  maxLength={256}
+                />
+              </div>
             </div>
-            <div className="space-y-2">
-              <Label>{t("licenses.externalWorkspaceID")}</Label>
-              <Input
-                value={externalWorkspaceID}
-                onChange={(e) => setExternalWorkspaceID(e.target.value)}
-                placeholder={t("licenses.externalIDPlaceholder")}
-                maxLength={256}
-              />
-            </div>
-          </div>
-          <div className="flex justify-end gap-2 pt-2">
+          </DialogBody>
+          <DialogFooter>
             <Button type="button" variant="outline" onClick={onClose}>
               {t("common.cancel")}
             </Button>
             <Button type="submit" disabled={loading || !planId}>
               {loading ? t("common.loading") : t("licenses.issue")}
             </Button>
-          </div>
+          </DialogFooter>
         </form>
       </DialogContent>
     </Dialog>
@@ -461,6 +450,20 @@ function LicenseDetail({ id, onClose }: { id: string; onClose: () => void }) {
     mutationFn: () => admin.suspendLicense(id),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["admin"] })
+    },
+    onError: (e: Error) => showToast(e.message, "error"),
+  })
+  // Unlinking is a deliberate act with Stripe's answer behind it: the
+  // server asks Stripe whether the subscription is really over and
+  // refuses while it is not, so this button cannot quietly detach a
+  // licence that is still being billed.
+  const [confirmUnlink, setConfirmUnlink] = useState(false)
+  const unlinkMut = useMutation({
+    mutationFn: () => admin.unlinkStripeSubscription(id),
+    onSuccess: (r) => {
+      qc.invalidateQueries({ queryKey: ["admin"] })
+      setConfirmUnlink(false)
+      showToast(r.status === "unlinked" ? t("licenses.unlinkDone") : t("licenses.unlinkNotLinked"), "success")
     },
     onError: (e: Error) => showToast(e.message, "error"),
   })
@@ -532,7 +535,10 @@ function LicenseDetail({ id, onClose }: { id: string; onClose: () => void }) {
 
   return (
     <Dialog open onOpenChange={onClose}>
-      <DialogContent className="max-w-2xl max-h-[85vh] overflow-y-auto">
+      {/* One frame for all three tabs. Sizing to the open tab made the
+          overlay jump between Info (long) and Usage/Seats (short), and
+          put the scrollbar on the whole dialog including its header. */}
+      <DialogContent className="flex h-[85vh] max-w-2xl flex-col overflow-hidden">
         <DialogHeader>
           <DialogTitle>{t("licenses.detail")}</DialogTitle>
           <DialogDescription>{lic?.email}</DialogDescription>
@@ -540,14 +546,14 @@ function LicenseDetail({ id, onClose }: { id: string; onClose: () => void }) {
         {isLoading || !lic ? (
           <div className="h-48 animate-pulse bg-muted rounded-lg" />
         ) : (
-          <Tabs defaultValue="info">
-            <TabsList>
+          <Tabs defaultValue="info" className="flex min-h-0 flex-1 flex-col">
+            <TabsList className="shrink-0">
               <TabsTrigger value="info">{t("licenses.info")}</TabsTrigger>
               <TabsTrigger value="usage">{t("licenses.usage")}</TabsTrigger>
               <TabsTrigger value="seats">{t("licenses.seats")}</TabsTrigger>
             </TabsList>
 
-            <TabsContent value="info">
+            <TabsContent value="info" className="-mr-6 min-h-0 flex-1 overflow-y-auto pr-6">
               <div className="space-y-6">
                 {/* Info */}
                 <div className="grid grid-cols-2 gap-4 text-sm">
@@ -595,9 +601,12 @@ function LicenseDetail({ id, onClose }: { id: string; onClose: () => void }) {
                     {editingValidUntil === null ? (
                       <div className="flex items-center gap-1 mt-1">
                         <p>{lic.valid_until ? formatDate(lic.valid_until) : t("licenses.perpetual")}</p>
-                        {/* Stripe owns the expiry for subscription licenses —
-                            editing it here would be overwritten on renewal. */}
-                        {lic.payment_provider !== "stripe" && (
+                        {/* A subscription owns the expiry of the licence it
+                          bills: editing it here would be overwritten on the
+                          next renewal. A one-time purchase renews nothing,
+                          and a licence unlinked from a finished subscription
+                          has nobody left to own it. */}
+                        {!lic.stripe_subscription_id && (
                           <Button
                             variant="ghost"
                             size="icon"
@@ -634,9 +643,9 @@ function LicenseDetail({ id, onClose }: { id: string; onClose: () => void }) {
                         </div>
                         <p className="text-xs text-muted-foreground">{t("licenses.validUntilClear")}</p>
                         {/* An expired license stays dead no matter what date
-                            is set — assertUsable short-circuits on the status
-                            before it ever reads valid_until. Say so, or the
-                            admin walks away thinking the edit revived it. */}
+                          is set — assertUsable short-circuits on the status
+                          before it ever reads valid_until. Say so, or the
+                          admin walks away thinking the edit revived it. */}
                         {lic.status === "expired" && (
                           <p className="text-xs text-amber-600">{t("licenses.validUntilExpiredHint")}</p>
                         )}
@@ -644,7 +653,7 @@ function LicenseDetail({ id, onClose }: { id: string; onClose: () => void }) {
                     )}
                   </div>
                   {/* Maintenance period, perpetual plans only. Not owned by
-                      Stripe: a paid renewal extends from whatever is set here. */}
+                    Stripe: a paid renewal extends from whatever is set here. */}
                   {lic.plan?.license_type === "perpetual" && (
                     <div>
                       <p className="text-muted-foreground">{t("licenses.updatesUntil")}</p>
@@ -702,6 +711,29 @@ function LicenseDetail({ id, onClose }: { id: string; onClose: () => void }) {
                       <Badge variant="secondary" className="mt-1">
                         {lic.payment_provider}
                       </Badge>
+                    </div>
+                  )}
+                  {/* The link, not the provider, is what decides: a
+                      licence can carry a subscription id with no
+                      payment_provider recorded, and it is the link that
+                      holds the plan and the expiry hostage. */}
+                  {lic.stripe_subscription_id && (
+                    <div>
+                      <p className="text-muted-foreground">{t("licenses.subscription")}</p>
+                      <div className="mt-1 flex items-center gap-2">
+                        <code className="max-w-[18ch] truncate text-xs" title={lic.stripe_subscription_id}>
+                          {lic.stripe_subscription_id}
+                        </code>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="h-6 px-2 text-xs"
+                          onClick={() => setConfirmUnlink(true)}
+                        >
+                          <Unlink className="mr-1 h-3 w-3" />
+                          {t("licenses.unlink")}
+                        </Button>
+                      </div>
                     </div>
                   )}
                   <div>
@@ -824,7 +856,7 @@ function LicenseDetail({ id, onClose }: { id: string; onClose: () => void }) {
                 </div>
 
                 {/* Activations — hidden for SaaS products (which don't
-                    use per-device activation; their user model is seats). */}
+                  use per-device activation; their user model is seats). */}
                 {lic.product?.type !== "saas" && (
                   <>
                     <Separator />
@@ -848,7 +880,9 @@ function LicenseDetail({ id, onClose }: { id: string; onClose: () => void }) {
                             {lic.activations.map((act) => (
                               <DataTableRow key={act.id}>
                                 <DataTableCell>
-                                  <code className="text-xs">{act.identifier}</code>
+                                  <code className="block max-w-[22ch] break-all text-xs" title={act.identifier}>
+                                    {act.identifier}
+                                  </code>
                                 </DataTableCell>
                                 <DataTableCell>
                                   <Badge variant="secondary">{act.identifier_type}</Badge>
@@ -901,11 +935,11 @@ function LicenseDetail({ id, onClose }: { id: string; onClose: () => void }) {
               </div>
             </TabsContent>
 
-            <TabsContent value="usage">
+            <TabsContent value="usage" className="-mr-6 min-h-0 flex-1 overflow-y-auto pr-6">
               <UsageTab licenseId={id} />
             </TabsContent>
 
-            <TabsContent value="seats">
+            <TabsContent value="seats" className="-mr-6 min-h-0 flex-1 overflow-y-auto pr-6">
               <SeatsTab licenseId={id} maxSeats={lic?.plan?.max_seats || 0} />
             </TabsContent>
           </Tabs>
@@ -917,9 +951,24 @@ function LicenseDetail({ id, onClose }: { id: string; onClose: () => void }) {
             licenseId={id}
             productId={lic.product_id}
             currentPlanId={lic.plan_id}
+            currentPlan={lic.plan}
             onClose={() => setChangingPlan(false)}
           />
         )}
+        <AlertDialog open={confirmUnlink} onOpenChange={() => setConfirmUnlink(false)}>
+          <AlertDialogContent>
+            <AlertDialogHeader>
+              <AlertDialogTitle>{t("licenses.unlinkTitle")}</AlertDialogTitle>
+              <AlertDialogDescription>{t("licenses.unlinkConfirm")}</AlertDialogDescription>
+            </AlertDialogHeader>
+            <div className="flex justify-end gap-2">
+              <AlertDialogCancel>{t("common.cancel")}</AlertDialogCancel>
+              <AlertDialogAction onClick={() => unlinkMut.mutate()} disabled={unlinkMut.isPending}>
+                {unlinkMut.isPending ? t("common.loading") : t("licenses.unlink")}
+              </AlertDialogAction>
+            </div>
+          </AlertDialogContent>
+        </AlertDialog>
         <AlertDialog open={!!confirmDeactivation} onOpenChange={() => setConfirmDeactivation(null)}>
           <AlertDialogContent>
             <AlertDialogHeader>
@@ -947,11 +996,10 @@ function LicenseDetail({ id, onClose }: { id: string; onClose: () => void }) {
 function UsageTab({ licenseId }: { licenseId: string }) {
   const { t } = useI18n()
   const qc = useQueryClient()
-  const [page, setPage] = useState(0)
-  const limit = 20
+  const pg = useServerPagination(20)
   const { data, isLoading } = useQuery({
-    queryKey: ["admin", "license-usage", licenseId, page],
-    queryFn: () => admin.getLicenseUsage(licenseId, { offset: page * limit, limit }),
+    queryKey: ["admin", "license-usage", licenseId, pg.page, pg.pageSize],
+    queryFn: () => admin.getLicenseUsage(licenseId, pg.params),
   })
 
   // confirmResetUsage holds the feature name pending confirmation.
@@ -970,9 +1018,7 @@ function UsageTab({ licenseId }: { licenseId: string }) {
   })
 
   const counters = data?.counters || []
-  const events = data?.events || []
-  const total = data?.total || 0
-  const totalPages = Math.ceil(total / limit)
+  const { items: events, total, totalPages } = pg.from(data, data?.events)
 
   if (isLoading) return <div className="h-32 animate-pulse bg-muted rounded-lg" />
 
@@ -1055,11 +1101,12 @@ function UsageTab({ licenseId }: { licenseId: string }) {
             </DataTable>
             {total > 0 && (
               <DataTablePagination
-                page={page}
+                page={pg.page}
                 totalPages={totalPages}
                 total={total}
-                pageSize={limit}
-                onPageChange={setPage}
+                pageSize={pg.pageSize}
+                onPageChange={pg.setPage}
+                onPageSizeChange={pg.setPageSize}
               />
             )}
           </>
@@ -1095,12 +1142,13 @@ function UsageTab({ licenseId }: { licenseId: string }) {
 // operator change a team's composition without consent.
 function SeatsTab({ licenseId, maxSeats }: { licenseId: string; maxSeats: number }) {
   const { t } = useI18n()
+  const pg = useServerPagination(20)
   const { data, isLoading } = useQuery({
-    queryKey: ["admin", "license-seats", licenseId],
-    queryFn: () => admin.getLicenseSeats(licenseId),
+    queryKey: ["admin", "license-seats", licenseId, pg.page, pg.pageSize],
+    queryFn: () => admin.getLicenseSeats(licenseId, pg.params),
   })
 
-  const seats = data?.seats || []
+  const { items: seats, total, totalPages } = pg.from(data, data?.seats)
   const activeCount = data?.active_count ?? 0
 
   if (isLoading) return <div className="h-32 animate-pulse bg-muted rounded-lg" />
@@ -1147,6 +1195,16 @@ function SeatsTab({ licenseId, maxSeats }: { licenseId: string; maxSeats: number
           </DataTableBody>
         </DataTable>
       )}
+      {total > pg.pageSize && (
+        <DataTablePagination
+          page={pg.page}
+          totalPages={totalPages}
+          total={total}
+          pageSize={pg.pageSize}
+          onPageChange={pg.setPage}
+          onPageSizeChange={pg.setPageSize}
+        />
+      )}
     </div>
   )
 }
@@ -1155,21 +1213,20 @@ function ChangePlanDialog({
   licenseId,
   productId,
   currentPlanId,
+  currentPlan,
   onClose,
 }: {
   licenseId: string
   productId: string
   currentPlanId: string
+  // The plan the licence is on now, so the box shows it even when the
+  // product has more plans than one page of candidates.
+  currentPlan?: Plan | null
   onClose: () => void
 }) {
   const { t } = useI18n()
   const qc = useQueryClient()
   const [planId, setPlanId] = useState(currentPlanId)
-  const { data: plansData } = useQuery({
-    queryKey: ["admin", "plans", productId],
-    queryFn: () => admin.listPlans(productId),
-  })
-  const plans = plansData?.plans || []
 
   const changeMut = useMutation({
     mutationFn: () => admin.changeLicensePlan(licenseId, { plan_id: planId }),
@@ -1192,31 +1249,30 @@ function ChangePlanDialog({
             e.preventDefault()
             changeMut.mutate()
           }}
-          className="space-y-4"
+          className="flex min-h-0 flex-1 flex-col gap-4"
         >
-          <div className="space-y-2">
-            <Label>{t("common.plan")}</Label>
-            <Select value={planId} onValueChange={setPlanId}>
-              <SelectTrigger>
-                <SelectValue placeholder="Select a plan" />
-              </SelectTrigger>
-              <SelectContent>
-                {plans.map((p) => (
-                  <SelectItem key={p.id} value={p.id}>
-                    {p.name} {p.id === currentPlanId ? "(current)" : ""}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
-          <div className="flex justify-end gap-2 pt-2">
+          <DialogBody className="space-y-4">
+            <div className="space-y-2">
+              <Label>{t("common.plan")}</Label>
+              <PlanSelect
+                productId={productId}
+                value={planId}
+                onChange={setPlanId}
+                current={currentPlan}
+                placeholder={t("licenses.selectPlan")}
+                className="w-full"
+                withType
+              />
+            </div>
+          </DialogBody>
+          <DialogFooter>
             <Button type="button" variant="outline" onClick={onClose}>
               {t("common.cancel")}
             </Button>
             <Button type="submit" disabled={changeMut.isPending || planId === currentPlanId}>
               {changeMut.isPending ? t("common.loading") : t("licenses.changePlan")}
             </Button>
-          </div>
+          </DialogFooter>
         </form>
       </DialogContent>
     </Dialog>

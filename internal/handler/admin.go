@@ -41,6 +41,12 @@ type AdminHandler struct {
 	// lowering it, leave the maintenance features off until the
 	// longer-lived links are gone.
 	FeedURLTTL time.Duration
+	// SubscriptionEnded reports whether Stripe is finished with a
+	// subscription — cancelled, expired, or gone from Stripe
+	// altogether. Wired in main from the payment package so this
+	// handler keeps its distance from the Stripe SDK; nil on installs
+	// without Stripe, where there is nothing to confirm against.
+	SubscriptionEnded func(ctx context.Context, subscriptionID string) (bool, error)
 	// beforeCutoffWrite runs between reading a license (and the plan
 	// or product it points at) and the transaction that writes it.
 	// Tests use it to commit a change in that window; nil everywhere
@@ -276,6 +282,19 @@ func (h *AdminHandler) updatePlan(c *gin.Context, p *model.Plan, needsGatedFeed,
 	})
 }
 
+// changesWith adds a field to an audit entry when it has something to
+// say, so the common case stays the same shape it always was.
+func changesWith(changes map[string]any, key, value string) map[string]any {
+	if value != "" {
+		changes[key] = value
+	}
+	return changes
+}
+
+// errStripeBilledPlanChange: the licence is on a live Stripe
+// subscription, and this endpoint does not move subscriptions.
+var errStripeBilledPlanChange = errors.New("plan changes for a Stripe-billed licence belong in Stripe")
+
 // firstNonNil returns err when it is set, otherwise the problem (as
 // an error) — the shape every "check, then write" step inside a
 // transaction returns.
@@ -378,12 +397,28 @@ func (h *AdminHandler) Stats(c *gin.Context) {
 // ─── Products ───
 
 func (h *AdminHandler) ListProducts(c *gin.Context) {
-	products, err := h.Store.ListProducts(c, c.Query("search"))
+	// type=desktop,hybrid narrows the catalogue to the kinds the
+	// caller can use. An unknown kind is refused rather than ignored:
+	// a typo that silently returned everything would have the
+	// dashboard offer products its own page cannot accept.
+	var types []string
+	if v := strings.TrimSpace(c.Query("type")); v != "" {
+		for _, t := range strings.Split(v, ",") {
+			t = strings.TrimSpace(t)
+			if !model.IsValidProductType(t) {
+				response.BadRequest(c, "unknown product type: "+t)
+				return
+			}
+			types = append(types, t)
+		}
+	}
+	page := listPage(c)
+	products, total, err := h.Store.ListProducts(c, c.Query("search"), types, page)
 	if err != nil {
 		response.Internal(c)
 		return
 	}
-	response.OK(c, gin.H{"products": products})
+	listOK(c, "products", products, total, page)
 }
 
 func (h *AdminHandler) GetProduct(c *gin.Context) {
@@ -693,9 +728,28 @@ func (h *AdminHandler) UpdateProduct(c *gin.Context) {
 
 func (h *AdminHandler) DeleteProduct(c *gin.Context) {
 	id := c.Param("id")
-	count, _ := h.Store.ProductLicenseCount(c, id)
-	if count > 0 {
+	// Plans, licences and releases each hold the product by a
+	// foreign key the database refuses to break. Counting them here
+	// is what turns "an internal error occurred" — with the reason
+	// only in Postgres's log — into a sentence saying what to clear
+	// first. Licences are named first: they are the one thing an
+	// admin cannot simply delete.
+	plans, licenses, releases, err := h.Store.ProductBlockers(c, id)
+	if err != nil {
+		response.Internal(c)
+		return
+	}
+	switch {
+	case licenses > 0:
 		response.Err(c, http.StatusConflict, "HAS_LICENSES", "cannot delete product with existing licenses")
+		return
+	case releases > 0:
+		response.Err(c, http.StatusConflict, "HAS_RELEASES",
+			"cannot delete a product that still has releases; delete them first")
+		return
+	case plans > 0:
+		response.Err(c, http.StatusConflict, "HAS_PLANS",
+			"cannot delete a product that still has plans; delete them first")
 		return
 	}
 	if err := h.Store.DeleteProduct(c, id); err != nil {
@@ -712,12 +766,13 @@ func (h *AdminHandler) DeleteProduct(c *gin.Context) {
 // ─── Plans ───
 
 func (h *AdminHandler) ListPlans(c *gin.Context) {
-	plans, err := h.Store.ListPlans(c, c.Query("product_id"), c.Query("search"))
+	page := listPage(c)
+	plans, total, err := h.Store.ListPlans(c, c.Query("product_id"), c.Query("search"), page)
 	if err != nil {
 		response.Internal(c)
 		return
 	}
-	response.OK(c, gin.H{"plans": plans})
+	listOK(c, "plans", plans, total, page)
 }
 
 func (h *AdminHandler) GetPlan(c *gin.Context) {
@@ -1574,12 +1629,13 @@ func (h *AdminHandler) DeleteEntitlement(c *gin.Context) {
 // ─── API Keys ───
 
 func (h *AdminHandler) ListAPIKeys(c *gin.Context) {
-	keys, err := h.Store.ListAPIKeys(c, c.Query("product_id"), c.Query("search"))
+	page := listPage(c)
+	keys, total, err := h.Store.ListAPIKeys(c, c.Query("product_id"), c.Query("search"), page)
 	if err != nil {
 		response.Internal(c)
 		return
 	}
-	response.OK(c, gin.H{"api_keys": keys})
+	listOK(c, "api_keys", keys, total, page)
 }
 
 func (h *AdminHandler) CreateAPIKey(c *gin.Context) {
@@ -1772,14 +1828,15 @@ func (h *AdminHandler) ListLicenses(c *gin.Context) {
 			productID = ak.ProductID
 		}
 	}
+	page := listPage(c)
 	licenses, total, err := h.Store.ListLicenses(c, store.LicenseListFilter{
 		ProductID:           productID,
 		Status:              c.Query("status"),
 		Search:              c.Query("search"),
 		ExternalCustomerID:  c.Query("external_customer_id"),
 		ExternalWorkspaceID: c.Query("external_workspace_id"),
-		Offset:              queryInt(c, "offset", 0),
-		Limit:               queryInt(c, "limit", 50),
+		Offset:              page.Offset,
+		Limit:               page.Limit,
 	})
 	if err != nil {
 		response.Internal(c)
@@ -1794,7 +1851,7 @@ func (h *AdminHandler) ListLicenses(c *gin.Context) {
 			hints[l.ID] = hint
 		}
 	}
-	response.OK(c, gin.H{"licenses": licenses, "total": total, "license_key_hints": hints})
+	listOK(c, "licenses", licenses, total, page, gin.H{"license_key_hints": hints})
 }
 
 func (h *AdminHandler) GetLicense(c *gin.Context) {
@@ -2194,12 +2251,18 @@ func (h *AdminHandler) SetLicenseValidUntil(c *gin.Context) {
 		return
 	}
 
-	// Stripe owns the expiry on billed licenses — the next renewal
-	// webhook overwrites whatever we set here, so accepting the edit
-	// would look like it worked and then silently revert. The dashboard
-	// hides the control; this closes the same door on the API, which
-	// licenses:write API keys also reach.
-	if lic.PaymentProvider == "stripe" {
+	// A subscription owns the expiry of the licence it bills: the next
+	// renewal webhook overwrites whatever is set here, so accepting
+	// the edit would look like it worked and then silently revert.
+	// The dashboard hides the control; this closes the same door on
+	// the API, which licenses:write API keys also reach.
+	//
+	// The link is what decides, not the payment provider. A one-time
+	// Stripe purchase renews nothing and has no webhook that would
+	// come back for the date, and a licence unlinked from a finished
+	// subscription has nothing pointing at it at all — refusing those
+	// would leave an expiry nobody on either side could set.
+	if lic.StripeSubscriptionID != "" {
 		response.Conflict(c, "STRIPE_MANAGED",
 			"expiry for Stripe-billed licenses is managed by the subscription", nil)
 		return
@@ -2382,6 +2445,85 @@ func (h *AdminHandler) SetLicenseUpdatesUntil(c *gin.Context) {
 	response.OK(c, lic)
 }
 
+// UnlinkStripeSubscription cuts a licence loose from a Stripe
+// subscription that is over, so it can be managed locally again —
+// moved to another plan, above all, which is refused while the link
+// stands because nothing here can move the subscription itself.
+//
+// The check is Stripe's, not ours: no local state proves the billing
+// stopped (suspend and revoke never reach Stripe, and "canceled" is
+// also what an `unpaid` subscription reads as, which paying the
+// invoice revives). SubscriptionEnded asks Stripe and is wired in
+// main; without it there is nothing to confirm with and the endpoint
+// refuses.
+//
+// Afterwards a refund of that subscription's last invoice no longer
+// finds the licence by subscription id — it falls back to the payment
+// intent and the customer — which is why this is a deliberate action
+// and not something inferred from a webhook.
+//
+// POST /admin/licenses/:id/stripe/unlink
+func (h *AdminHandler) UnlinkStripeSubscription(c *gin.Context) {
+	id := c.Param("id")
+	if !h.checkLicenseScope(c, id) {
+		return
+	}
+	lic, err := h.Store.FindLicenseByID(c, id)
+	if err != nil {
+		response.NotFound(c, "license not found")
+		return
+	}
+	if lic.StripeSubscriptionID == "" {
+		response.OK(c, gin.H{"status": "not_linked"})
+		return
+	}
+	if h.SubscriptionEnded == nil {
+		response.Err(c, http.StatusServiceUnavailable, "STRIPE_UNAVAILABLE",
+			"Stripe is not configured on this install, so the subscription's state cannot be confirmed")
+		return
+	}
+	ended, err := h.SubscriptionEnded(c, lic.StripeSubscriptionID)
+	if err != nil {
+		// Stripe's own refusals carry their own wording — a key that
+		// cannot see the subscription is a different problem from a
+		// call that failed.
+		var ae *apperr.AppError
+		if errors.As(err, &ae) {
+			response.Err(c, ae.Status, ae.Code, ae.Message)
+			return
+		}
+		response.Err(c, http.StatusBadGateway, "STRIPE_UNAVAILABLE",
+			"could not ask Stripe about this subscription; try again")
+		return
+	}
+	if !ended {
+		response.Conflict(c, "SUBSCRIPTION_LIVE",
+			"Stripe still has this subscription; cancel it there (or from the customer portal) before unlinking", nil)
+		return
+	}
+	subscriptionID := lic.StripeSubscriptionID
+	// Cleared only while the licence still points at the subscription
+	// Stripe just answered about. A checkout that linked a new one in
+	// the meantime is not what the admin confirmed, and unlinking it
+	// would cut a subscription that is still billing.
+	cleared, err := h.Store.ClearStripeSubscription(c, id, subscriptionID)
+	if err != nil {
+		response.Internal(c)
+		return
+	}
+	if !cleared {
+		response.Conflict(c, "SUBSCRIPTION_CHANGED",
+			"this license moved to a different Stripe subscription while you were looking at it; reload and check again", nil)
+		return
+	}
+	h.Store.Audit(c, &model.AuditLog{
+		Entity: "license", EntityID: id, Action: "stripe_unlinked",
+		ActorType: "admin", ActorID: adminID(c),
+		Changes: map[string]any{"stripe_subscription_id": subscriptionID},
+	})
+	response.OK(c, gin.H{"status": "unlinked"})
+}
+
 func (h *AdminHandler) DeleteActivation(c *gin.Context) {
 	id := c.Param("id")
 	pid, err := h.Store.GetActivationProductID(c, id)
@@ -2402,25 +2544,27 @@ func (h *AdminHandler) DeleteActivation(c *gin.Context) {
 // ─── Audit Logs ───
 
 func (h *AdminHandler) ListAuditLogs(c *gin.Context) {
+	page := listPage(c)
 	logs, total, err := h.Store.ListAuditLogs(c,
 		c.Query("entity"), c.Query("entity_id"), c.Query("product_id"),
-		queryInt(c, "offset", 0), queryInt(c, "limit", 50))
+		page.Offset, page.Limit)
 	if err != nil {
 		response.Internal(c)
 		return
 	}
-	response.OK(c, gin.H{"audit_logs": logs, "total": total})
+	listOK(c, "audit_logs", logs, total, page)
 }
 
 // ─── Users ───
 
 func (h *AdminHandler) ListUsers(c *gin.Context) {
-	users, total, err := h.Store.ListUsers(c, c.Query("search"), queryInt(c, "offset", 0), queryInt(c, "limit", 50))
+	page := listPage(c)
+	users, total, err := h.Store.ListUsers(c, c.Query("search"), page.Offset, page.Limit)
 	if err != nil {
 		response.Internal(c)
 		return
 	}
-	response.OK(c, gin.H{"users": users, "total": total})
+	listOK(c, "users", users, total, page)
 }
 
 // ─── Helpers ───
@@ -2495,14 +2639,14 @@ func (h *AdminHandler) ListLicenseUsage(c *gin.Context) {
 	if !h.checkLicenseScope(c, id) {
 		return
 	}
-	events, total, err := h.Store.ListUsageEvents(c, id, c.Query("feature"),
-		queryInt(c, "offset", 0), queryInt(c, "limit", 50))
+	page := listPage(c)
+	events, total, err := h.Store.ListUsageEvents(c, id, c.Query("feature"), page.Offset, page.Limit)
 	if err != nil {
 		response.Internal(c)
 		return
 	}
 	counters, _ := h.Store.GetUsageSummary(c, id)
-	response.OK(c, gin.H{"events": events, "counters": counters, "total": total})
+	listOK(c, "events", events, total, page, gin.H{"counters": counters})
 }
 
 func (h *AdminHandler) ResetLicenseUsage(c *gin.Context) {
@@ -2546,13 +2690,14 @@ func (h *AdminHandler) ListLicenseSeats(c *gin.Context) {
 	if !h.checkLicenseScope(c, id) {
 		return
 	}
-	seats, err := h.Store.ListSeats(c, id)
+	page := listPage(c)
+	seats, total, err := h.Store.ListSeats(c, id, page)
 	if err != nil {
 		response.Internal(c)
 		return
 	}
 	count, _ := h.Store.CountActiveSeats(c, id)
-	response.OK(c, gin.H{"seats": seats, "active_count": count})
+	listOK(c, "seats", seats, total, page, gin.H{"active_count": count})
 }
 
 // ─── Analytics (admin) ───
@@ -2574,6 +2719,11 @@ func (h *AdminHandler) ListAnalytics(c *gin.Context) {
 		to = time.Now()
 	}
 
+	// Analytics is the one list that is not paged. It is a time
+	// series: the caller already bounds it by asking for a date range,
+	// every row is one day (or week, or month) of it, and the chart
+	// that reads it draws the whole window — handing it page 2 of a
+	// line would draw a line with a hole in it.
 	if granularity == "weekly" || granularity == "monthly" {
 		snapshots, err := h.Store.ListAnalyticsSnapshotsAggregated(c, productID, from, to, granularity)
 		if err != nil {
@@ -2716,12 +2866,13 @@ func (h *AdminHandler) GetUserDetail(c *gin.Context) {
 // ─── Addons ───
 
 func (h *AdminHandler) ListAddons(c *gin.Context) {
-	addons, err := h.Store.ListAddons(c, c.Query("product_id"), c.Query("search"))
+	page := listPage(c)
+	addons, total, err := h.Store.ListAddons(c, c.Query("product_id"), c.Query("search"), page)
 	if err != nil {
 		response.Internal(c)
 		return
 	}
-	response.OK(c, gin.H{"addons": addons})
+	listOK(c, "addons", addons, total, page)
 }
 
 func (h *AdminHandler) CreateAddon(c *gin.Context) {
@@ -2930,12 +3081,13 @@ func (h *AdminHandler) ListLicenseAddons(c *gin.Context) {
 	if !h.checkLicenseScope(c, id) {
 		return
 	}
-	addons, err := h.Store.ListLicenseAddons(c, id)
+	page := listPage(c)
+	addons, total, err := h.Store.ListLicenseAddons(c, id, page)
 	if err != nil {
 		response.Internal(c)
 		return
 	}
-	response.OK(c, gin.H{"addons": addons})
+	listOK(c, "addons", addons, total, page)
 }
 
 func (h *AdminHandler) ListFloatingSessions(c *gin.Context) {
@@ -2943,13 +3095,14 @@ func (h *AdminHandler) ListFloatingSessions(c *gin.Context) {
 	if !h.checkLicenseScope(c, id) {
 		return
 	}
-	sessions, err := h.Store.ListFloatingSessions(c, id)
+	page := listPage(c)
+	sessions, total, err := h.Store.ListFloatingSessions(c, id, page)
 	if err != nil {
 		response.Internal(c)
 		return
 	}
 	active, _ := h.Store.CountActiveFloating(c, id)
-	response.OK(c, gin.H{"sessions": sessions, "active": active})
+	listOK(c, "sessions", sessions, total, page, gin.H{"active": active})
 }
 
 // ─── Change Plan (admin) ───
@@ -3005,6 +3158,10 @@ func (h *AdminHandler) ChangeLicensePlan(c *gin.Context) {
 	// stale branch would clear a paid period and close its renewal
 	// ledger.
 	moved := false
+	// What the re-shape decided, for the audit entry: support reads
+	// that log to answer "why is this licence active now" and "who
+	// moved its expiry date".
+	newStatus, newValidUntil := "", ""
 	if h.beforeCutoffWrite != nil {
 		h.beforeCutoffWrite()
 	}
@@ -3035,6 +3192,27 @@ func (h *AdminHandler) ChangeLicensePlan(c *gin.Context) {
 			return nil
 		}
 
+		// While a licence is tied to a Stripe subscription, its plan
+		// is Stripe's to change, not this endpoint's: nothing here
+		// moves the subscription, so Stripe would keep charging the
+		// old price while the admin panel, the portal and the
+		// subscription row all showed the new plan — and nothing
+		// reconciles it afterwards, since
+		// customer.subscription.updated syncs status and dates but
+		// never plan_id. The portal's change-plan does it in the
+		// right order, Stripe first. A plan's Stripe price is unique,
+		// so there is no same-price move to wave through either.
+		//
+		// No local state is taken as proof that the billing ended:
+		// suspending and revoking never reach Stripe at all, and even
+		// "canceled" is what Stripe's `unpaid` is written as, which
+		// an invoice paid later revives. The way out is
+		// UnlinkStripeSubscription — a deliberate act with Stripe's
+		// own answer behind it.
+		if locked.StripeSubscriptionID != "" && newPlan.ID != locked.PlanID {
+			return errStripeBilledPlanChange
+		}
+
 		// The maintenance period follows the license type. Leaving
 		// perpetual clears it (subscriptions follow valid_until);
 		// entering perpetual starts the new plan's period; moving
@@ -3061,6 +3239,60 @@ func (h *AdminHandler) ChangeLicensePlan(c *gin.Context) {
 		default:
 			l.UpdatesUntil = locked.UpdatesUntil
 		}
+		// A licence takes the shape the new plan would have issued it
+		// in. Without this it keeps the old type's: a trial licence
+		// moved to a perpetual plan stays "trialing" with the trial's
+		// valid_until, so the customer who just bought it is refused
+		// on the day the trial would have ended — and the hourly
+		// trial sweep marks it expired. Only the status a plan change
+		// can speak for is touched: suspended and revoked are
+		// somebody's decision about this licence, not about its plan.
+		if fromPlan.LicenseType != newPlan.LicenseType {
+			status := locked.Status
+			if newPlan.LicenseType == "trial" {
+				if status == model.StatusActive || status == model.StatusTrialing {
+					status = model.StatusTrialing
+				}
+			} else if status == model.StatusTrialing {
+				// Only the trial's own status is this endpoint's to
+				// settle: "trialing" describes the plan the licence
+				// was on, and nothing else can clear it (reinstate
+				// takes suspended, expired and canceled — not this).
+				// An expired licence is left expired: moving a plan
+				// is not evidence that anyone paid, and giving access
+				// back has its own deliberate action.
+				status = model.StatusActive
+			}
+			if status != locked.Status {
+				l.Status = status
+				newStatus = status
+				cols = append(cols, "status")
+			}
+			// The deadline moves only when a trial is on one side of
+			// the change, because only then is it the plan's: a trial
+			// plan issues one, and it leaves with the trial. Between
+			// two plans that issue none — perpetual to subscription,
+			// say — whatever date the licence carries is an admin's
+			// own, set through the expiry control and shown in the
+			// dashboard, and clearing it here would hand the customer
+			// a licence that never expires without saying so.
+			if fromPlan.LicenseType == "trial" || newPlan.LicenseType == "trial" {
+				var until *time.Time
+				if newPlan.LicenseType == "trial" && newPlan.TrialDays > 0 {
+					t := time.Now().Add(time.Duration(newPlan.TrialDays) * 24 * time.Hour)
+					until = &t
+				}
+				if !model.SameEnd(until, locked.ValidUntil) {
+					l.ValidUntil = until
+					cols = append(cols, "valid_until")
+					newValidUntil = "cleared"
+					if until != nil {
+						newValidUntil = until.Format(time.RFC3339)
+					}
+				}
+			}
+		}
+
 		if grantsPeriod {
 			// Granting a period here is an issuance like any other:
 			// every replica must understand it, the product's feeds
@@ -3077,9 +3309,40 @@ func (h *AdminHandler) ChangeLicensePlan(c *gin.Context) {
 				return problem
 			}
 		}
-		return update(ctx, tx, l, cols...)
+		if err := update(ctx, tx, l, cols...); err != nil {
+			return err
+		}
+		// The subscription row is part of the licence's shape, not a
+		// separate record to drift from it: issuance writes one for
+		// trial and subscription plans, and nothing downstream would
+		// correct it — the hourly sync only repairs expired, canceled
+		// and revoked, so a licence that left a trial would read
+		// "active" here and "trialing" there for good.
+		effectiveStatus := locked.Status
+		if newStatus != "" {
+			effectiveStatus = newStatus
+		}
+		// The deadline the licence actually carries after this write:
+		// the re-shape above sets it only when the plan's type
+		// changed, and the subscription's trial window is derived
+		// from it rather than reckoned again.
+		effectiveUntil := locked.ValidUntil
+		if slices.Contains(cols, "valid_until") {
+			effectiveUntil = l.ValidUntil
+		}
+		return store.SyncLicenseSubscriptionIn(ctx, tx, l.ID, newPlan, effectiveStatus, effectiveUntil)
 	})
 	if err != nil {
+		if errors.Is(err, errStripeBilledPlanChange) {
+			// Says what to do next, in order: the portal moves the
+			// subscription in Stripe as well, and cancelling alone is
+			// not enough — the link stays until it is cut, which is
+			// what Unlink does once Stripe confirms the subscription
+			// is over.
+			response.Conflict(c, "STRIPE_MANAGED",
+				"this license is billed by a Stripe subscription: change the plan from the customer portal, which moves the subscription in Stripe too — or cancel the subscription in Stripe and then use Unlink on this license", nil)
+			return
+		}
 		if feedGateRefused(c, err) {
 			return
 		}
@@ -3098,7 +3361,9 @@ func (h *AdminHandler) ChangeLicensePlan(c *gin.Context) {
 	h.Store.Audit(c, &model.AuditLog{
 		Entity: "license", EntityID: id, Action: "plan_changed",
 		ActorType: "admin", ActorID: adminID(c),
-		Changes: map[string]any{"old_plan_id": oldPlanID, "new_plan_id": req.PlanID},
+		Changes: changesWith(changesWith(
+			map[string]any{"old_plan_id": oldPlanID, "new_plan_id": req.PlanID},
+			"status", newStatus), "valid_until", newValidUntil),
 	})
 
 	if h.Webhook != nil {
@@ -3409,12 +3674,13 @@ func (h *AdminHandler) GetEmailTemplates(c *gin.Context) {
 
 // ListTeamMembers returns all platform admins (owner + admin roles).
 func (h *AdminHandler) ListTeamMembers(c *gin.Context) {
-	admins, err := h.Store.ListAdmins(c)
+	page := listPage(c)
+	admins, total, err := h.Store.ListAdmins(c, page)
 	if err != nil {
 		response.Internal(c)
 		return
 	}
-	response.OK(c, gin.H{"members": admins})
+	listOK(c, "members", admins, total, page)
 }
 
 // InviteTeamMember promotes an existing user to admin, or creates a placeholder admin user.

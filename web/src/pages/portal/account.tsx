@@ -30,6 +30,7 @@ export default function PortalAccountPage() {
       setEditing(false)
       refetch() // Refresh auth user context
       qc.invalidateQueries({ queryKey: ["portal"] })
+      showToast(t("portal.profileSaved"), "success")
     },
     onError: (e: Error) => showToast(e.message, "error"),
   })
@@ -117,9 +118,6 @@ export default function PortalAccountPage() {
                     {user?.email}
                   </div>
                 </>
-              )}
-              {saveMut.isSuccess && !editing && (
-                <p className="text-xs text-emerald-600 mt-1">{t("portal.profileSaved")}</p>
               )}
             </div>
           </div>

@@ -289,12 +289,19 @@ func (s *Store) FindUserIsAdmin(ctx context.Context, userID string) bool {
 }
 
 // ListAdmins returns all users with admin or owner role.
-func (s *Store) ListAdmins(ctx context.Context) ([]*model.User, error) {
+func (s *Store) ListAdmins(ctx context.Context, p Page) ([]*model.User, int, error) {
 	var out []*model.User
-	err := s.DB.NewSelect().Model(&out).
+	q := s.DB.NewSelect().Model(&out).
 		Where("role IN ('owner', 'admin')").
-		OrderExpr("created_at ASC").Scan(ctx)
-	return out, err
+		OrderExpr("created_at ASC, id ASC")
+	total, err := scanPage(ctx, q, p)
+	if err != nil {
+		return nil, 0, err
+	}
+	if p.Limit <= 0 {
+		total = len(out)
+	}
+	return out, total, nil
 }
 
 // SetUserRole updates a user's role. Only owners can promote/demote.
@@ -700,9 +707,35 @@ func UpdateLicenseIn(ctx context.Context, db bun.IDB, l *model.License, cols ...
 	return err
 }
 
-// UpdateLicenseAndSubscription updates both the license status and its linked subscription
-// in a single transaction for atomicity.
+// ErrSubscriptionUnlinked reports that the licence no longer points at
+// the subscription the caller resolved it from, so the write was not
+// made. It is the expected answer, not a failure: an admin unlinked
+// the licence while a Stripe event for the old subscription was in
+// flight, and that event must not put subscription-managed state back
+// on a licence that is now managed locally.
+var ErrSubscriptionUnlinked = errors.New("license no longer linked to this subscription")
+
+// UpdateLicenseAndSubscription writes the licence and mirrors its
+// status onto the subscription row, both in one transaction.
 func (s *Store) UpdateLicenseAndSubscription(ctx context.Context, lic *model.License, cols ...string) error {
+	return s.updateLicenseAndSubscription(ctx, lic, false, cols...)
+}
+
+// UpdateLicenseFromSubscription is the same write for a caller that
+// found this licence *by* its subscription id — every Stripe
+// subscription webhook does.
+//
+// It applies only while the licence still carries that id. Between the
+// read and this write an admin may have unlinked it — a deliberate act
+// taken only after Stripe confirmed the subscription was over — and an
+// unconditional write by primary key would undo it, restoring a status
+// and a period nothing in Stripe backs any more. Then it answers
+// ErrSubscriptionUnlinked and writes nothing.
+func (s *Store) UpdateLicenseFromSubscription(ctx context.Context, lic *model.License, cols ...string) error {
+	return s.updateLicenseAndSubscription(ctx, lic, true, cols...)
+}
+
+func (s *Store) updateLicenseAndSubscription(ctx context.Context, lic *model.License, stillLinked bool, cols ...string) error {
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -713,8 +746,19 @@ func (s *Store) UpdateLicenseAndSubscription(ctx context.Context, lic *model.Lic
 	allCols := make([]string, len(cols)+1)
 	copy(allCols, cols)
 	allCols[len(cols)] = "updated_at"
-	if _, err := tx.NewUpdate().Model(lic).Column(allCols...).WherePK().Exec(ctx); err != nil {
+	q := tx.NewUpdate().Model(lic).Column(allCols...).WherePK()
+	guarded := stillLinked && lic.StripeSubscriptionID != ""
+	if guarded {
+		q = q.Where("stripe_subscription_id = ?", lic.StripeSubscriptionID)
+	}
+	res, err := q.Exec(ctx)
+	if err != nil {
 		return err
+	}
+	if guarded {
+		if n, err := res.RowsAffected(); err == nil && n == 0 {
+			return ErrSubscriptionUnlinked
+		}
 	}
 
 	// Sync subscription status if one exists
@@ -736,7 +780,7 @@ func (s *Store) ListLicensesByEmail(ctx context.Context, email string) ([]*model
 		Relation("Plan").Relation("Plan.Entitlements").
 		Relation("Product").Relation("Activations").Relation("Seats").
 		Where("license.email = ? OR license.id IN (SELECT license_id FROM seats WHERE email = ? AND removed_at IS NULL)", email, email).
-		OrderExpr("license.created_at DESC").Scan(ctx)
+		OrderExpr("license.created_at DESC, license.id DESC").Scan(ctx)
 	return out, err
 }
 
@@ -1564,6 +1608,35 @@ func (s *Store) MarkEmailFailed(ctx context.Context, id, token, errMsg string) {
 		).Exec(ctx)
 		return err
 	})
+}
+
+// ClearStripeSubscription unlinks a licence from the Stripe
+// subscription the caller confirmed is over, and reports whether it
+// was still linked to that one.
+//
+// The expected id is part of the write: what the admin was shown, and
+// what Stripe answered about, is the subscription being cut loose. If
+// the licence has moved to another one in between, this changes
+// nothing and says so, rather than detaching a subscription nobody
+// asked about.
+//
+// NULL, not the empty string: the column carries a plain UNIQUE
+// constraint, so a second licence cleared to an empty string would
+// collide with the first one — while NULLs do not collide at all,
+// which is why every licence without a subscription holds NULL.
+func (s *Store) ClearStripeSubscription(ctx context.Context, licenseID, expectedSubID string) (bool, error) {
+	res, err := s.DB.NewRaw(
+		"UPDATE licenses SET stripe_subscription_id = NULL, updated_at = now() WHERE id = ? AND stripe_subscription_id = ?",
+		licenseID, expectedSubID,
+	).Exec(ctx)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
 }
 
 // UpdateLicenseEmailByStripeCustomer updates email on all licenses for a Stripe customer.

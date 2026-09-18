@@ -109,7 +109,7 @@ func (h *PublicPlansHandler) ListPlans(c *gin.Context) {
 		return
 	}
 
-	plans, err := h.Store.ListPlans(c, prod.ID, "")
+	plans, _, err := h.Store.ListPlans(c, prod.ID, "", store.All)
 	if err != nil {
 		response.Internal(c)
 		return

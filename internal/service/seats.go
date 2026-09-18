@@ -264,7 +264,7 @@ func (s *SeatService) ListSeats(ctx context.Context, licenseKey, productID strin
 		return nil, err
 	}
 
-	seats, err := s.store.ListSeats(ctx, lic.ID)
+	seats, _, err := s.store.ListSeats(ctx, lic.ID, store.All)
 	if err != nil {
 		return nil, apperr.Internal(err)
 	}

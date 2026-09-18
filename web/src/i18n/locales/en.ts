@@ -154,6 +154,14 @@ const en = {
   "licenses.reinstate": "Reinstate",
   "licenses.refundConfirm":
     "This will cancel the subscription at the payment provider and revoke the license. The customer will lose access immediately.",
+  "licenses.selectPlan": "Select a plan",
+  "licenses.subscription": "Stripe subscription",
+  "licenses.unlink": "Unlink",
+  "licenses.unlinkTitle": "Unlink this Stripe subscription?",
+  "licenses.unlinkConfirm":
+    "Keygate asks Stripe first and refuses while the subscription is still there. Once unlinked, this license is managed here again — its plan and expiry become editable — and a refund of that subscription’s last invoice will no longer find it by subscription id.",
+  "licenses.unlinkDone": "Subscription unlinked.",
+  "licenses.unlinkNotLinked": "This license has no Stripe subscription.",
   "licenses.changePlan": "Change Plan",
   "licenses.seats": "Seats",
   "licenses.role": "Role",
@@ -490,6 +498,10 @@ const en = {
   "portal.renewUpdates": "Renew updates",
 
   // Filters
+  "filter.searchProducts": "Search products…",
+  "filter.searchPlans": "Search plans…",
+  "filter.noMatches": "No matches",
+  "filter.moreMatches": "+{count} more — keep typing to narrow",
   "filter.allProducts": "All products",
   "filter.allStatuses": "All statuses",
   "filter.allPlans": "All plans",
@@ -609,6 +621,7 @@ const en = {
   "addons.quotaZeroHint": "Whole number. 0 means no limit.",
 
   // Toast messages
+  "toast.dismiss": "Dismiss",
   "toast.productCreated": "Product created successfully.",
   "toast.productDeleted": "Product deleted.",
   "toast.planCreated": "Plan created successfully.",

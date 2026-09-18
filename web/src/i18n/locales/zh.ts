@@ -148,6 +148,14 @@ const zh = {
   "licenses.suspendConfirm": "此操作将暂停许可证。客户将无法激活或使用软件，直到恢复。",
   "licenses.reinstate": "恢复",
   "licenses.refundConfirm": "此操作将在支付平台取消订阅并吊销许可证。客户将立即失去访问权限。",
+  "licenses.selectPlan": "选择方案",
+  "licenses.subscription": "Stripe 订阅",
+  "licenses.unlink": "解绑",
+  "licenses.unlinkTitle": "解绑这个 Stripe 订阅？",
+  "licenses.unlinkConfirm":
+    "Keygate 会先向 Stripe 确认，订阅还在就会拒绝。解绑后这张授权重新由本地管理（方案和到期日可以改），而该订阅最后一张发票的退款将不再能通过订阅 id 找到它。",
+  "licenses.unlinkDone": "订阅已解绑。",
+  "licenses.unlinkNotLinked": "这张授权没有绑定 Stripe 订阅。",
   "licenses.changePlan": "更换方案",
   "licenses.seats": "席位",
   "licenses.role": "角色",
@@ -477,6 +485,10 @@ const zh = {
   "portal.renewUpdates": "续费更新",
 
   // Filters
+  "filter.searchProducts": "搜索产品…",
+  "filter.searchPlans": "搜索方案…",
+  "filter.noMatches": "没有匹配项",
+  "filter.moreMatches": "还有 {count} 个，继续输入以缩小范围",
   "filter.allProducts": "所有产品",
   "filter.allStatuses": "所有状态",
   "filter.allPlans": "所有方案",
@@ -597,6 +609,7 @@ const zh = {
 
   // Error boundary
   // Toast messages
+  "toast.dismiss": "关闭",
   "toast.productCreated": "产品创建成功。",
   "toast.productDeleted": "产品已删除。",
   "toast.planCreated": "方案创建成功。",

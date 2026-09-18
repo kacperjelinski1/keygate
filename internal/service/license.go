@@ -72,8 +72,8 @@ type ActivateResult struct {
 
 func (s *LicenseService) Activate(ctx context.Context, in ActivateInput) (*ActivateResult, error) {
 	if s.failures != nil {
-		if blocked, _ := s.failures.IsBlocked("ip:" + in.IPAddress); blocked {
-			return nil, apperr.New(429, "LOCKED_OUT", "too many failed attempts")
+		if blocked, retryAfter := s.failures.IsBlocked(middleware.FailureKeyIP(in.IPAddress)); blocked {
+			return nil, lockedOut(retryAfter)
 		}
 	}
 
@@ -84,9 +84,8 @@ func (s *LicenseService) Activate(ctx context.Context, in ActivateInput) (*Activ
 	lic, err := s.store.FindLicenseByKey(ctx, in.LicenseKey)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			if s.failures != nil {
-				s.failures.RecordFailure("key:" + in.LicenseKey)
-				s.failures.RecordFailure("ip:" + in.IPAddress)
+			if locked := s.recordFailure(in.IPAddress); locked != nil {
+				return nil, locked
 			}
 			return nil, apperr.New(404, "LICENSE_NOT_FOUND", "license not found")
 		}
@@ -94,9 +93,8 @@ func (s *LicenseService) Activate(ctx context.Context, in ActivateInput) (*Activ
 	}
 
 	if in.ProductID != "" && lic.ProductID != in.ProductID {
-		if s.failures != nil {
-			s.failures.RecordFailure("key:" + in.LicenseKey)
-			s.failures.RecordFailure("ip:" + in.IPAddress)
+		if locked := s.recordFailure(in.IPAddress); locked != nil {
+			return nil, locked
 		}
 		return nil, apperr.New(404, "LICENSE_NOT_FOUND", "license not found")
 	}
@@ -152,8 +150,7 @@ func (s *LicenseService) Activate(ctx context.Context, in ActivateInput) (*Activ
 	})
 
 	if s.failures != nil {
-		s.failures.RecordSuccess("key:" + in.LicenseKey)
-		s.failures.RecordSuccess("ip:" + in.IPAddress)
+		s.failures.RecordSuccess(middleware.FailureKeyIP(in.IPAddress))
 	}
 
 	s.logger.Info("license activated",
@@ -177,6 +174,35 @@ func (s *LicenseService) Activate(ctx context.Context, in ActivateInput) (*Activ
 		Token: token,
 		Meta:  responseMeta(),
 	}, nil
+}
+
+// recordFailure files a failed attempt and reports the lockout when
+// this was the attempt that caused one. The guard middleware turns
+// away everything after it, but the request that crosses the line is
+// answered from here — and a plain 404 tells a client nothing about
+// the wall it has just walked into, so it comes straight back.
+func (s *LicenseService) recordFailure(ip string) *apperr.AppError {
+	if s.failures == nil {
+		return nil
+	}
+	key := middleware.FailureKeyIP(ip)
+	s.failures.RecordFailure(key)
+	if blocked, retryAfter := s.failures.IsBlocked(key); blocked {
+		return lockedOut(retryAfter)
+	}
+	return nil
+}
+
+// lockedOut is the refusal a caller meets while their address is
+// locked out. It carries how long to wait: the guard middleware sets
+// Retry-After when it turns a request away on its own, but the
+// request that trips the lock is answered from here, and a client
+// told only "too many failed attempts" retries straight away.
+func lockedOut(retryAfter time.Duration) *apperr.AppError {
+	return apperr.WithDetails(
+		apperr.New(429, "LOCKED_OUT", "too many failed attempts"),
+		map[string]any{"retry_after": middleware.RetryAfterSeconds(retryAfter)},
+	)
 }
 
 // ─── Verify ───
@@ -211,17 +237,16 @@ type VerifyResult struct {
 
 func (s *LicenseService) Verify(ctx context.Context, in VerifyInput) (*VerifyResult, error) {
 	if s.failures != nil {
-		if blocked, _ := s.failures.IsBlocked("ip:" + in.IPAddress); blocked {
-			return nil, apperr.New(429, "LOCKED_OUT", "too many failed attempts")
+		if blocked, retryAfter := s.failures.IsBlocked(middleware.FailureKeyIP(in.IPAddress)); blocked {
+			return nil, lockedOut(retryAfter)
 		}
 	}
 
 	lic, err := s.store.FindLicenseByKey(ctx, in.LicenseKey)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			if s.failures != nil {
-				s.failures.RecordFailure("key:" + in.LicenseKey)
-				s.failures.RecordFailure("ip:" + in.IPAddress)
+			if locked := s.recordFailure(in.IPAddress); locked != nil {
+				return nil, locked
 			}
 			return nil, apperr.New(404, "LICENSE_NOT_FOUND", "license not found")
 		}
@@ -229,9 +254,8 @@ func (s *LicenseService) Verify(ctx context.Context, in VerifyInput) (*VerifyRes
 	}
 
 	if in.ProductID != "" && lic.ProductID != in.ProductID {
-		if s.failures != nil {
-			s.failures.RecordFailure("key:" + in.LicenseKey)
-			s.failures.RecordFailure("ip:" + in.IPAddress)
+		if locked := s.recordFailure(in.IPAddress); locked != nil {
+			return nil, locked
 		}
 		return nil, apperr.New(404, "LICENSE_NOT_FOUND", "license not found")
 	}
@@ -247,11 +271,11 @@ func (s *LicenseService) Verify(ctx context.Context, in VerifyInput) (*VerifyRes
 	// which license_key strings are real. Paid users learn lifecycle state
 	// via email + the (session-auth) portal, not via this routine call.
 	if err := s.assertUsable(lic); err != nil {
-		if s.failures != nil {
-			s.failures.RecordFailure("key:" + in.LicenseKey)
-			s.failures.RecordFailure("ip:" + in.IPAddress)
-		}
+		locked := s.recordFailure(in.IPAddress)
 		middleware.LicenseVerifications.WithLabelValues(lic.ProductID, "unusable").Inc()
+		if locked != nil {
+			return nil, locked
+		}
 		return nil, licenseNotFound()
 	}
 
@@ -266,8 +290,7 @@ func (s *LicenseService) Verify(ctx context.Context, in VerifyInput) (*VerifyRes
 	_ = s.store.TouchActivation(ctx, act.ID)
 
 	if s.failures != nil {
-		s.failures.RecordSuccess("key:" + in.LicenseKey)
-		s.failures.RecordSuccess("ip:" + in.IPAddress)
+		s.failures.RecordSuccess(middleware.FailureKeyIP(in.IPAddress))
 	}
 
 	planName := ""
@@ -308,17 +331,16 @@ type DeactivateInput struct {
 
 func (s *LicenseService) Deactivate(ctx context.Context, in DeactivateInput) error {
 	if s.failures != nil {
-		if blocked, _ := s.failures.IsBlocked("ip:" + in.IPAddress); blocked {
-			return apperr.New(429, "LOCKED_OUT", "too many failed attempts")
+		if blocked, retryAfter := s.failures.IsBlocked(middleware.FailureKeyIP(in.IPAddress)); blocked {
+			return lockedOut(retryAfter)
 		}
 	}
 
 	lic, err := s.store.FindLicenseByKey(ctx, in.LicenseKey)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			if s.failures != nil {
-				s.failures.RecordFailure("key:" + in.LicenseKey)
-				s.failures.RecordFailure("ip:" + in.IPAddress)
+			if locked := s.recordFailure(in.IPAddress); locked != nil {
+				return locked
 			}
 			return apperr.New(404, "LICENSE_NOT_FOUND", "license not found")
 		}
@@ -326,9 +348,8 @@ func (s *LicenseService) Deactivate(ctx context.Context, in DeactivateInput) err
 	}
 
 	if in.ProductID != "" && lic.ProductID != in.ProductID {
-		if s.failures != nil {
-			s.failures.RecordFailure("key:" + in.LicenseKey)
-			s.failures.RecordFailure("ip:" + in.IPAddress)
+		if locked := s.recordFailure(in.IPAddress); locked != nil {
+			return locked
 		}
 		return apperr.New(404, "LICENSE_NOT_FOUND", "license not found")
 	}
@@ -350,8 +371,7 @@ func (s *LicenseService) Deactivate(ctx context.Context, in DeactivateInput) err
 	}
 
 	if s.failures != nil {
-		s.failures.RecordSuccess("key:" + in.LicenseKey)
-		s.failures.RecordSuccess("ip:" + in.IPAddress)
+		s.failures.RecordSuccess(middleware.FailureKeyIP(in.IPAddress))
 	}
 
 	s.store.Audit(ctx, &model.AuditLog{

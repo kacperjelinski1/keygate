@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
-import { ArrowUpCircle, Check, Mail, RefreshCw, Send, Shield, Trash2, UserPlus } from "lucide-react"
+import { ArrowUpCircle, Check, RefreshCw, Send, Shield, Trash2, UserPlus } from "lucide-react"
 import { useEffect, useState } from "react"
 import { showToast } from "@/components/toast"
 import {
@@ -15,13 +15,13 @@ import {
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
+import { DataTablePagination, useServerPagination } from "@/components/ui/data-table"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { useAuth } from "@/hooks/use-auth"
 import { useI18n } from "@/i18n"
-import type { User } from "@/lib/api"
 import { admin } from "@/lib/api"
 import EmailTemplatesManager from "@/pages/admin/email-templates"
 
@@ -88,7 +88,6 @@ export default function SettingsPage() {
   })
 
   const [form, setForm] = useState<Record<string, string>>({})
-  const [saved, setSaved] = useState(false)
 
   useEffect(() => {
     if (data?.settings) {
@@ -110,14 +109,14 @@ export default function SettingsPage() {
     mutationFn: () => admin.updateSettings(changedSettings()),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["admin", "settings"] })
-      setSaved(true)
-      setTimeout(() => setSaved(false), 3000)
+      showToast(t("settings.saved"), "success")
     },
     onError: (e: Error) => showToast(e.message, "error"),
   })
 
   const testEmailMut = useMutation({
     mutationFn: admin.sendTestEmail,
+    onSuccess: () => showToast(t("settings.testEmailSent"), "success"),
     onError: (e: Error) => showToast(e.message, "error"),
   })
 
@@ -153,16 +152,12 @@ export default function SettingsPage() {
           <h1 className="text-2xl font-bold tracking-tight">{t("settings.title")}</h1>
           <p className="text-muted-foreground">{t("settings.subtitle")}</p>
         </div>
+        {/* The outcome goes to a toast, like every other page. Swapping
+            the label to "Saved" resized the button under the cursor and
+            was the only place in the dashboard that reported a result
+            inside a control. */}
         <Button onClick={() => saveMut.mutate()} disabled={saveMut.isPending}>
-          {saved ? (
-            <>
-              <Check className="h-4 w-4 mr-2" /> {t("settings.saved")}
-            </>
-          ) : saveMut.isPending ? (
-            t("common.loading")
-          ) : (
-            t("common.save")
-          )}
+          {saveMut.isPending ? t("common.loading") : t("common.save")}
         </Button>
       </div>
 
@@ -297,16 +292,6 @@ export default function SettingsPage() {
                   <Send className="h-4 w-4 mr-2" />
                   {t("settings.testEmail")}
                 </Button>
-                {testEmailMut.isSuccess && (
-                  <span className="text-sm text-emerald-600 flex items-center gap-1">
-                    <Mail className="h-4 w-4" /> {t("settings.testEmailSent")}
-                  </span>
-                )}
-                {testEmailMut.isError && (
-                  <span className="text-sm text-destructive">
-                    {testEmailMut.error instanceof Error ? testEmailMut.error.message : t("settings.testEmailFailed")}
-                  </span>
-                )}
               </div>
             </CardContent>
           </Card>
@@ -500,9 +485,10 @@ function TeamManagement() {
   const [role, setRole] = useState("admin")
   const isOwner = user?.role === "owner"
 
+  const pg = useServerPagination(20)
   const { data, isLoading } = useQuery({
-    queryKey: ["admin", "team"],
-    queryFn: admin.listTeam,
+    queryKey: ["admin", "team", pg.page, pg.pageSize],
+    queryFn: () => admin.listTeam(pg.params),
   })
 
   const inviteMut = useMutation({
@@ -520,7 +506,7 @@ function TeamManagement() {
     onError: (e: Error) => showToast(e.message, "error"),
   })
 
-  const members: User[] = data?.members || []
+  const { items: members, total, totalPages } = pg.from(data, data?.members)
 
   return (
     <div className="space-y-6">
@@ -583,6 +569,16 @@ function TeamManagement() {
                 </div>
               ))}
             </div>
+          )}
+          {total > pg.pageSize && (
+            <DataTablePagination
+              page={pg.page}
+              totalPages={totalPages}
+              total={total}
+              pageSize={pg.pageSize}
+              onPageChange={pg.setPage}
+              onPageSizeChange={pg.setPageSize}
+            />
           )}
 
           {/* Invite form (owner only) */}

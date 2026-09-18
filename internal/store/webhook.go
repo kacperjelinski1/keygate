@@ -22,17 +22,23 @@ func (s *Store) FindWebhookByID(ctx context.Context, id string) (*model.Webhook,
 	return w, s.DB.NewSelect().Model(w).Relation("Product").Where("webhook.id = ?", id).Scan(ctx)
 }
 
-func (s *Store) ListWebhooks(ctx context.Context, productID, search string) ([]*model.Webhook, error) {
+func (s *Store) ListWebhooks(ctx context.Context, productID, search string, p Page) ([]*model.Webhook, int, error) {
 	var out []*model.Webhook
-	q := s.DB.NewSelect().Model(&out).Relation("Product").OrderExpr("webhook.created_at DESC")
+	q := s.DB.NewSelect().Model(&out).Relation("Product").OrderExpr("webhook.created_at DESC, webhook.id DESC")
 	if productID != "" {
 		q = q.Where("webhook.product_id = ?", productID)
 	}
 	if search != "" {
 		q = q.Where("webhook.url ILIKE ?", "%"+search+"%")
 	}
-	err := q.Scan(ctx)
-	return out, err
+	total, err := scanPage(ctx, q, p)
+	if err != nil {
+		return nil, 0, err
+	}
+	if p.Limit <= 0 {
+		total = len(out)
+	}
+	return out, total, nil
 }
 
 func (s *Store) UpdateWebhook(ctx context.Context, w *model.Webhook) error {

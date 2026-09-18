@@ -31,6 +31,7 @@ import (
 	"github.com/tabloy/keygate/internal/model"
 	"github.com/tabloy/keygate/internal/service"
 	"github.com/tabloy/keygate/internal/store"
+	"github.com/tabloy/keygate/pkg/apperr"
 	"github.com/tabloy/keygate/pkg/response"
 	"github.com/uptrace/bun"
 )
@@ -1044,6 +1045,33 @@ const (
 	fulfilledSessionProvider = "stripe_fulfill"
 )
 
+// SubscriptionEnded reports whether Stripe is finished with a
+// subscription: cancelled, never completed, or no longer there at
+// all. The admin API asks before letting a licence off a Stripe
+// subscription, because no local state answers it — "canceled" is
+// also what an unpaid subscription reads as, and paying its invoice
+// brings it back.
+func (h *StripeHandler) SubscriptionEnded(ctx context.Context, subscriptionID string) (bool, error) {
+	sub, err := subscription.Get(subscriptionID, nil)
+	if err != nil {
+		// A 404 says this API key cannot see the subscription, not
+		// that the subscription is over: a key rotated to another
+		// account, or pointed at the other side of test/live, answers
+		// exactly the same way about one that is still charging a
+		// card. Only Stripe saying "ended" is evidence of an ending.
+		if stripeNotFound(err) {
+			return false, apperr.New(409, "STRIPE_NOT_VISIBLE",
+				"Stripe cannot see this subscription with the API key this install uses — check that the key belongs to the right account and to the same test/live mode; until then there is no way to tell a deleted subscription from one that is still billing")
+		}
+		return false, err
+	}
+	switch sub.Status {
+	case stripe.SubscriptionStatusCanceled, stripe.SubscriptionStatusIncompleteExpired:
+		return true, nil
+	}
+	return false, nil
+}
+
 // stripeNotFound reports a 404 from Stripe: the object is gone for
 // good, which is a permanent condition, not a transient failure.
 func stripeNotFound(err error) bool {
@@ -1261,6 +1289,34 @@ func (e *subscriptionEvent) PeriodEnd() int64 {
 	return end
 }
 
+// applyLicenseFromSubscription writes what a subscription event says
+// about its licence and reports whether the write landed.
+//
+// "No longer linked" is the ordinary outcome it looks like: an admin
+// unlinked the licence after Stripe confirmed the subscription had
+// ended, and this event — already in flight, or replayed — must not
+// put the old billing state back.
+//
+// Callers must stop on false. Everything that follows one of these
+// writes describes it to the outside world — an audit line, a
+// license.canceled webhook, a dunning email — and saying a licence was
+// cancelled while the row stays active is worse than silence: the
+// downstream system revokes access the database still grants.
+func (h *StripeHandler) applyLicenseFromSubscription(ctx context.Context, lic *model.License, event string, cols ...string) bool {
+	err := h.Store.UpdateLicenseFromSubscription(ctx, lic, cols...)
+	if errors.Is(err, store.ErrSubscriptionUnlinked) {
+		slog.Info("stripe webhook: license was unlinked from this subscription, event ignored",
+			"event", event, "license_id", lic.ID, "subscription_id", lic.StripeSubscriptionID)
+		return false
+	}
+	if err != nil {
+		slog.Error("stripe webhook: license write failed",
+			"event", event, "license_id", lic.ID, "error", err)
+		return false
+	}
+	return true
+}
+
 func (h *StripeHandler) onInvoicePaid(ctx context.Context, raw json.RawMessage) {
 	var data invoiceEvent
 	if json.Unmarshal(raw, &data) != nil || data.SubscriptionID() == "" {
@@ -1284,7 +1340,9 @@ func (h *StripeHandler) onInvoicePaid(ctx context.Context, raw json.RawMessage) 
 	lic.ValidUntil = &until
 	lic.Status = model.StatusActive
 	lic.PastDueAt = nil
-	_ = h.Store.UpdateLicenseAndSubscription(ctx, lic, "valid_until", "status", "past_due_at")
+	if !h.applyLicenseFromSubscription(ctx, lic, "invoice.paid", "valid_until", "status", "past_due_at") {
+		return
+	}
 
 	// Recovery notification — shares the dedup path with
 	// onSubscriptionUpdated. Some flows emit invoice.paid without a
@@ -1353,7 +1411,9 @@ func (h *StripeHandler) onSubscriptionUpdated(ctx context.Context, raw json.RawM
 	} else {
 		cols = []string{"status", "canceled_at", "past_due_at"}
 	}
-	_ = h.Store.UpdateLicenseAndSubscription(ctx, lic, cols...)
+	if !h.applyLicenseFromSubscription(ctx, lic, "customer.subscription.updated", cols...) {
+		return
+	}
 
 	// Recovery notification fires only on past_due → active. Routed
 	// through notifyPaymentRecovered so concurrent webhooks (Stripe
@@ -1417,7 +1477,9 @@ func (h *StripeHandler) onSubscriptionDeleted(ctx context.Context, raw json.RawM
 	now := time.Now()
 	lic.CanceledAt = &now
 	lic.PastDueAt = nil
-	_ = h.Store.UpdateLicenseAndSubscription(ctx, lic, "status", "canceled_at", "past_due_at")
+	if !h.applyLicenseFromSubscription(ctx, lic, "customer.subscription.deleted", "status", "canceled_at", "past_due_at") {
+		return
+	}
 
 	h.Store.Audit(ctx, &model.AuditLog{
 		Entity: "license", EntityID: lic.ID, Action: "canceled",
@@ -1446,7 +1508,9 @@ func (h *StripeHandler) onPaymentFailed(ctx context.Context, raw json.RawMessage
 		now := time.Now()
 		lic.Status = model.StatusPastDue
 		lic.PastDueAt = &now
-		_ = h.Store.UpdateLicenseAndSubscription(ctx, lic, "status", "past_due_at")
+		if !h.applyLicenseFromSubscription(ctx, lic, "invoice.payment_failed", "status", "past_due_at") {
+			return
+		}
 
 		h.Store.Audit(ctx, &model.AuditLog{
 			Entity: "license", EntityID: lic.ID, Action: "payment_failed",
@@ -2376,7 +2440,9 @@ func (h *StripeHandler) onSubscriptionPaused(ctx context.Context, raw json.RawMe
 	lic.Status = model.StatusSuspended
 	now := time.Now()
 	lic.SuspendedAt = &now
-	_ = h.Store.UpdateLicenseAndSubscription(ctx, lic, "status", "suspended_at")
+	if !h.applyLicenseFromSubscription(ctx, lic, "customer.subscription.paused", "status", "suspended_at") {
+		return
+	}
 
 	h.Store.Audit(ctx, &model.AuditLog{
 		Entity: "license", EntityID: lic.ID, Action: "suspended",
@@ -2402,7 +2468,9 @@ func (h *StripeHandler) onSubscriptionResumed(ctx context.Context, raw json.RawM
 	}
 	lic.Status = model.StatusActive
 	lic.SuspendedAt = nil
-	_ = h.Store.UpdateLicenseAndSubscription(ctx, lic, "status", "suspended_at")
+	if !h.applyLicenseFromSubscription(ctx, lic, "customer.subscription.resumed", "status", "suspended_at") {
+		return
+	}
 
 	h.Store.Audit(ctx, &model.AuditLog{
 		Entity: "license", EntityID: lic.ID, Action: "reinstated",
